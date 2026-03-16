@@ -14,7 +14,7 @@ from Simulation import quad_sim
 SCRIPT_DIR = Path(__file__).resolve().parent
 DATA_DIR = SCRIPT_DIR  # change if CSVs are in a subfolder
 noise_std = 0.02    # Gaussian noise std; 0 to disable
-dt = 0.1               # time step (s)  # (used only for CSV case)
+dt = 0.1               # time step (s)
 
 enable_filter = True
 filter_type = 'savgol'  # 'savgol' or 'butter'
@@ -24,50 +24,17 @@ butter_order = 2
 butter_cutoff = 2.0
 
 # ====================================================
-# Load CSV and preprocess
-# ====================================================
-def load_trajectory(fp: Path, noise_std=0.0):
-    df = pd.read_csv(fp)
-    states = df.iloc[:, 0:12].values.astype(float)
-
-    # Add Gaussian noise
-    if noise_std > 0:
-        states += np.random.normal(0, noise_std, states.shape)
-
-    # Time vector
-    N = states.shape[0]
-    t = np.arange(N) * dt
-
-    # Optional filtering
-    if enable_filter:
-        fs = 1.0 / dt
-        for i in range(states.shape[1]):
-            if filter_type == 'savgol':
-                states[:, i] = savgol_filter(states[:, i], savgol_window, savgol_poly)
-            else:
-                nyq = 0.5 * fs
-                Wn = butter_cutoff / nyq
-                b, a = butter(butter_order, Wn, btype='low')
-                states[:, i] = filtfilt(b, a, states[:, i])
-
-    # Center positions only
-    states[:, 0:3] -= states[0, 0:3]
-
-    U = None  # no control inputs in CSV
-    return t, states, U
-
-# ====================================================
 # Collect all CSVs   (REPLACED BY QUAD SIM TRAJECTORIES)
 # ====================================================
 
 # Instead of reading CSV files, generate trajectories with quad_sim.
 # We keep the structure: "all_files" is replaced by multiple simulated runs.
 
-n_runs = 5          # number of trajectories for training
-traj_id = 2         # which trajectory type to use from quad_sim (1: helical or 2: figure eight)
+n_runs = 10          # number of simulated trajectories (train on n_runs-1, test on last)
+traj_id = 1         # which trajectory type to use from quad_sim (1: helical or 2: figure eight)
 
 quad = quad_sim()
-t_all, states_all, U_all = quad.fct_run_simulation(traj_id, n_runs)
+t_all, states_all, U_all, ref_traj_list = quad.fct_run_simulation(traj_id, n_runs)
 # t_all.shape      = (n_runs, T)
 # states_all.shape = (n_runs, T, 12)
 # U_all.shape      = (n_runs, T, n_inputs)
@@ -81,31 +48,30 @@ Xc_list, Xn_list, U_list = [], [], []
 
 # Use the first n_runs - 1 trajectories for training
 for run in range(n_runs - 1):
-    # Extract this run's time and states
-    t_run = t_all[run]              # (T,)
-    states_run = states_all[run]    # (T, 12)
-
-    # Center positions only (like load_trajectory did)
-    states_run = states_run.copy()
-    states_run[:, 0:3] -= states_run[0, 0:3]
+    t_run = t_all[run]               # (T,)
+    states_run = states_all[run]     # (T, 12)
+    U_run = U_all[run]               # (T, n_inputs)
 
     if states_run.shape[0] < 2:
         continue
 
-    # Current and next state snapshots
+    # current / next state snapshots
     Xc_list.append(states_run[:-1, :])   # (T-1, 12)
     Xn_list.append(states_run[1:, :])    # (T-1, 12)
 
-    # For now, ignore control inputs so behavior matches original CSV EDMD
-    U_list.append(np.zeros((0, states_run.shape[0]-1)))
+    # control snapshots aligned with Xc
+    U_list.append(U_run[:-1, :].T)       # (n_inputs, T-1)
 
 # Stack all runs
-Xc = np.vstack(Xc_list).T    # (12, K)
-Xn = np.vstack(Xn_list).T    # (12, K)
+Xc = np.vstack(Xc_list).T          # (12, K)
+Xn = np.vstack(Xn_list).T          # (12, K)
 
-# U is empty (no controls)
-U_train = np.hstack(U_list)  # (0, K)
-U_norm = U_train             # no scaling needed
+# Stack control inputs
+U_train = np.hstack(U_list)        # (n_inputs, K)
+
+# Scale control inputs
+u_scaler = StandardScaler()
+U_norm = u_scaler.fit_transform(U_train.T).T   # (n_inputs, K)
 
 # ====================================================
 # Scale states
@@ -203,33 +169,92 @@ Phi = np.column_stack([observables(Xn_s[:, k]) for k in range(Xn_s.shape[1])])
 # ====================================================
 # EDMDc via pseudoinverse
 # ====================================================
-Omega = np.vstack([Psi, U_norm])   # U_norm is empty, so this is just Psi
+Omega = np.vstack([Psi, U_norm])
 AB = Phi @ pinv(Omega)
 n_obs = Psi.shape[0]
 A = AB[:, :n_obs]
-B = AB[:, n_obs:]  # empty if no controls (will be (n_obs, 0))
+B = AB[:, n_obs:]  # (n_obs, n_inputs)
 
 # ====================================================
 # Simple prediction test (use last simulated run, unseen in training)
 # ====================================================
-t_test = t_all[n_runs - 1]                   # (T,)
-states_test = states_all[n_runs - 1].copy()  # (T, 12)
+t_test = t_all[n_runs - 1]                    # (M,)
+states_test = states_all[n_runs - 1].copy()   # (M, 12)
+U_test = U_all[n_runs - 1]                    # (M, n_inputs)
+ref_test = ref_traj_list[n_runs - 1]
 
-# Center positions the same way as in training
-states_test[:, 0:3] -= states_test[0, 0:3]
+# ====================================================
+# Plot reference trajectory for the test run (WORLD FRAME)
+# ====================================================
+xr = np.array([r["pos"][0] for r in ref_test], dtype=float)
+yr = np.array([r["pos"][1] for r in ref_test], dtype=float)
+zr = np.array([r["pos"][2] for r in ref_test], dtype=float)
+
+fig = plt.figure()
+ax = fig.add_subplot(111, projection="3d")
+ax.plot(xr, yr, zr, '--', linewidth=2, label="Reference trajectory")
+ax.set_xlabel("X [m]")
+ax.set_ylabel("Y [m]")
+ax.set_zlabel("Z [m]")
+ax.set_title("Reference trajectory used for test run (world frame)")
+ax.legend()
+ax.grid(True)
+plt.show()
+
+# ====================================================
+# Plot simulation response vs reference trajectory (WORLD FRAME)
+# ====================================================
+x_sim = states_test[:, 0]
+y_sim = states_test[:, 1]
+z_sim = states_test[:, 2]
+
+fig = plt.figure()
+ax = fig.add_subplot(111, projection="3d")
+ax.plot(xr, yr, zr, '--', linewidth=2, label="Reference trajectory")
+ax.plot(x_sim, y_sim, z_sim, linewidth=2, label="Simulation response")
+ax.set_xlabel("X [m]")
+ax.set_ylabel("Y [m]")
+ax.set_zlabel("Z [m]")
+ax.set_title("Simulation response vs reference (world frame)")
+ax.legend()
+ax.grid(True)
+plt.show()
 
 M = states_test.shape[0]
 
 Psi_pred = np.zeros((n_obs, M))
-Psi_pred[:, 0] = observables(scaler.transform(states_test[0, :].reshape(1, -1)).flatten())
+Psi_pred[:, 0] = observables(
+    scaler.transform(states_test[0, :].reshape(1, -1)).flatten()
+)
 
 # Predict while clipping to prevent overflow
 clip_value = 1e6
 for k in range(1, M):
-    Psi_pred[:, k] = A @ Psi_pred[:, k - 1]
+    u_k = U_test[k-1, :].reshape(1, -1)
+    u_k_s = u_scaler.transform(u_k).flatten()
+
+    Psi_pred[:, k] = A @ Psi_pred[:, k - 1] + B @ u_k_s
     Psi_pred[:, k] = np.clip(Psi_pred[:, k], -clip_value, clip_value)
 
 x_pred = scaler.inverse_transform(Psi_pred[:12, :].T).T
+
+# ====================================================
+# Plot EDMD predicted trajectory (3D) for the test run (WORLD FRAME)
+# ====================================================
+x_edmd = x_pred[0, :]
+y_edmd = x_pred[1, :]
+z_edmd = x_pred[2, :]
+
+fig = plt.figure()
+ax = fig.add_subplot(111, projection="3d")
+ax.plot(x_edmd, y_edmd, z_edmd, linewidth=2, label="EDMD predicted trajectory")
+ax.set_xlabel("X [m]")
+ax.set_ylabel("Y [m]")
+ax.set_zlabel("Z [m]")
+ax.set_title("EDMD predicted trajectory (test run, world frame)")
+ax.legend()
+ax.grid(True)
+plt.show()
 
 # ====================================================
 # Plot results

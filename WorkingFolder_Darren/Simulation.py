@@ -222,84 +222,215 @@ class quad_sim:
         return traj
 
     def fct_run_simulation(self, traj, n):
+        """
+        Run n simulations using a single trajectory type.
 
-        if traj == 1:
-            ref_traj = self.fct_make_helical_trajectory(self.time,
-                center=(0.0, 0.0),
-                radius=random.randint(1,5),
-                z_start=random.randint(0,5),
-                z_end=random.randint(6,15),
-                n_turns=random.randint(1,5),
-                yaw_follows_path=True
-            )
-            init_state = np.zeros(12)
-            init_state[0:3] = ref_traj[0]["pos"]
+        All runs start at:
+            position = (0,0,0)
+            velocity = (0,0,0)
+            angles = 0
 
-        elif traj == 2:
-            ref_traj = self.fct_make_figure8_trajectory(
-                self.time,
-                center=(1.0, 1.0, 1.0),
-                a=random.randint(1,5),
-                b=random.randint(1,5),
-                n_loops=random.randint(1,5),
-                tilt_deg=random.randint(10,80),
-                yaw_follows_path=True
-            )
-            init_state = np.zeros(12)
-            init_state[0:3] = ref_traj[0]["pos"]
+        traj = 1  -> helical trajectory
+        traj = 2  -> figure-8 trajectory
 
-        else:
-            raise ValueError("traj must be 1 or 2")
+        Returns
+        -------
+        t : (n, T)
+        states : (n, T, 12)
+        U : (n, T, n_inputs)
+        ref_traj_list : list of reference trajectories used for each run
+        """
 
-        # Run once to learn shapes (or you can assume them)
-        t0, states0, omegas0, U0 = self.sim_PID.fct_simulate(self.time, self.dt, ref_traj, init_state)
+        import random
 
-        # Preallocate 3D arrays: (run, time_index, variable)
-        t = np.zeros((n, t0.shape[0]))
-        states = np.zeros((n, states0.shape[0], states0.shape[1]))
-        U = np.zeros((n, U0.shape[0], U0.shape[1]))
+        t_runs = []
+        states_runs = []
+        U_runs = []
+        ref_traj_list = []
 
-        # Store first run
-        t[0, :] = t0
-        states[0, :, :] = states0
-        U[0, :, :] = U0
+        for i in range(n):
 
-            # Remaining runs
-        for i in range(1, n):
+            # =====================================================
+            # Generate trajectory
+            # =====================================================
 
-            # --- build a NEW random trajectory for each run ---
             if traj == 1:
+
                 ref_traj = self.fct_make_helical_trajectory(
                     self.time,
                     center=(0.0, 0.0),
-                    radius=random.randint(1, 5),
-                    z_start=random.randint(0, 5),
-                    z_end=random.randint(6, 15),
-                    n_turns=random.randint(1, 5),
+                    radius=random.uniform(1,5),
+                    z_start=0.0,
+                    z_end=random.uniform(5,10),
+                    n_turns=random.uniform(1,5),
                     yaw_follows_path=True
                 )
-                init_state = np.zeros(12)
-                init_state[0:3] = ref_traj[0]["pos"]
 
             elif traj == 2:
+
                 ref_traj = self.fct_make_figure8_trajectory(
                     self.time,
-                    center=(1.0, 1.0, 1.0),
-                    a=random.randint(1, 5),
-                    b=random.randint(1, 5),
-                    n_loops=random.randint(1, 5),
-                    tilt_deg=random.randint(10, 80),
+                    center=(0.0, 0.0, 0.0),
+                    a=random.uniform(1,5),
+                    b=random.uniform(1,5),
+                    n_loops=random.uniform(1,5),
+                    tilt_deg=random.uniform(10,80),
                     yaw_follows_path=True
                 )
-                init_state = np.zeros(12)
-                init_state[0:3] = ref_traj[0]["pos"]
 
-            # --- simulate this run with its own trajectory ---
+            else:
+                raise ValueError("traj must be 1 or 2")
+
+            # =====================================================
+            # Shift trajectory so it starts at (0,0,0)
+            # =====================================================
+
+            p0 = ref_traj[0]["pos"].copy()
+
+            for k in range(len(ref_traj)):
+                ref_traj[k]["pos"] = ref_traj[k]["pos"] - p0
+
+            ref_traj_list.append(ref_traj)
+
+            # =====================================================
+            # Initial state = ZERO
+            # =====================================================
+
+            init_state = np.zeros(12)
+
+            # =====================================================
+            # Run simulation
+            # =====================================================
+
             t_i, states_i, omegas_i, U_i = self.sim_PID.fct_simulate(
                 self.time, self.dt, ref_traj, init_state
             )
-            t[i, :] = t_i
-            states[i, :, :] = states_i
-            U[i, :, :] = U_i
 
-        return t, states, U
+            t_runs.append(t_i)
+            states_runs.append(states_i)
+            U_runs.append(U_i)
+
+        # =====================================================
+        # Stack results
+        # =====================================================
+
+        t = np.stack(t_runs, axis=0)
+        states = np.stack(states_runs, axis=0)
+        U = np.stack(U_runs, axis=0)
+
+        return t, states, U, ref_traj_list
+
+    # def fct_run_simulation(self, traj, n):
+    #     """
+    #     Run n simulations cycling through available trajectory types.
+
+    #     Returns
+    #     -------
+    #     t : (n, T)
+    #     states : (n, T, 12)
+    #     U : (n, T, n_inputs)
+    #     ref_traj_list : list of reference trajectories used for each run
+    #     """
+
+    #     import random
+
+    #     # ---------------------------------------------------------
+    #     # List of trajectory types available
+    #     # Add more numbers here if you create more trajectory types
+    #     # ---------------------------------------------------------
+    #     traj_ids = [1, 2]
+    #     num_traj_types = len(traj_ids)
+
+    #     start_index = (traj - 1) % num_traj_types
+
+    #     t_runs = []
+    #     states_runs = []
+    #     U_runs = []
+    #     ref_traj_list = []
+
+    #     for i in range(n):
+
+    #         # Cycle through trajectory types
+    #         traj_id = traj_ids[(start_index + i) % num_traj_types]
+
+    #         # =====================================================
+    #         # Build random trajectory parameters
+    #         # =====================================================
+
+    #         if traj_id == 1:
+    #             ref_traj = self.fct_make_helical_trajectory(
+    #                 self.time,
+    #                 center=(random.uniform(-2,2), random.uniform(-2,2)),
+    #                 radius=random.uniform(1,5),
+    #                 z_start=random.uniform(0,5),
+    #                 z_end=random.uniform(6,15),
+    #                 n_turns=random.uniform(1,5),
+    #                 yaw_follows_path=True
+    #             )
+
+    #         elif traj_id == 2:
+    #             ref_traj = self.fct_make_figure8_trajectory(
+    #                 self.time,
+    #                 center=(random.uniform(-2,2), random.uniform(-2,2), random.uniform(0.5,3)),
+    #                 a=random.uniform(1,5),
+    #                 b=random.uniform(1,5),
+    #                 n_loops=random.uniform(1,5),
+    #                 tilt_deg=random.uniform(10,80),
+    #                 yaw_follows_path=True
+    #             )
+
+    #         else:
+    #             raise ValueError("Unknown trajectory id")
+
+    #         ref_traj_list.append(ref_traj)
+
+    #         # =====================================================
+    #         # Choose a random starting point on the trajectory
+    #         # =====================================================
+
+    #         k0 = np.random.randint(0, len(self.time))
+
+    #         pos0 = ref_traj[k0]["pos"].copy()
+    #         vel0 = ref_traj[k0]["vel"].copy()
+    #         yaw0 = ref_traj[k0]["yaw"]
+
+    #         # Small perturbations
+    #         pos0 += np.random.normal(0,0.1,3)
+    #         vel0 += np.random.normal(0,0.05,3)
+
+    #         phi0 = np.random.normal(0,np.deg2rad(5))
+    #         theta0 = np.random.normal(0,np.deg2rad(5))
+    #         psi0 = yaw0 + np.random.normal(0,np.deg2rad(5))
+
+    #         # =====================================================
+    #         # Build initial state
+    #         # =====================================================
+
+    #         init_state = np.zeros(12)
+    #         init_state[0:3] = pos0
+    #         init_state[3:6] = vel0
+    #         init_state[6] = phi0
+    #         init_state[7] = theta0
+    #         init_state[8] = psi0
+
+    #         # =====================================================
+    #         # Run simulation
+    #         # =====================================================
+
+    #         t_i, states_i, omegas_i, U_i = self.sim_PID.fct_simulate(
+    #             self.time, self.dt, ref_traj, init_state
+    #         )
+
+    #         t_runs.append(t_i)
+    #         states_runs.append(states_i)
+    #         U_runs.append(U_i)
+
+    #     # =====================================================
+    #     # Stack runs
+    #     # =====================================================
+
+    #     t = np.stack(t_runs, axis=0)
+    #     states = np.stack(states_runs, axis=0)
+    #     U = np.stack(U_runs, axis=0)
+
+    #     return t, states, U, ref_traj_list
