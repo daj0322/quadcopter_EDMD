@@ -42,7 +42,7 @@ class quad_sim:
 
     # Time setup
     dt = 0.01
-    time = np.arange(0.0, 40.0, dt)
+    time = np.arange(0.0, 35.0, dt)
 
     def fct_make_helical_trajectory(self, time,
                                     center=(0.0, 0.0),
