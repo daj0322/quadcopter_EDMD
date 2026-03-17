@@ -1,3 +1,4 @@
+# %%
 import numpy as np
 import pandas as pd
 from scipy.linalg import pinv
@@ -8,13 +9,14 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from Simulation import quad_sim
 
+# %%
 # ====================================================
 # CONFIG
 # ====================================================
 SCRIPT_DIR = Path(__file__).resolve().parent
 DATA_DIR = SCRIPT_DIR  # change if CSVs are in a subfolder
-noise_std = 0.02    # Gaussian noise std; 0 to disable
-dt = 0.1               # time step (s)
+noise_std = 0.0    # Gaussian noise std; 0 to disable
+dt = 0.01               # time step (s)
 
 enable_filter = True
 filter_type = 'savgol'  # 'savgol' or 'butter'
@@ -30,8 +32,8 @@ butter_cutoff = 2.0
 # Instead of reading CSV files, generate trajectories with quad_sim.
 # We keep the structure: "all_files" is replaced by multiple simulated runs.
 
-n_runs = 10          # number of simulated trajectories (train on n_runs-1, test on last)
-traj_id = 1         # which trajectory type to use from quad_sim (1: helical or 2: figure eight)
+n_runs = 30          # number of simulated trajectories (train on n_runs-1, test on last)
+traj_id = 2         # which trajectory type to use from quad_sim (1: helical or 2: figure eight)
 
 quad = quad_sim()
 t_all, states_all, U_all, ref_traj_list = quad.fct_run_simulation(traj_id, n_runs)
