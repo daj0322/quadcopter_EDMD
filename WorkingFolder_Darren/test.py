@@ -32,7 +32,7 @@ butter_cutoff = 2.0
 # Instead of reading CSV files, generate trajectories with quad_sim.
 # We keep the structure: "all_files" is replaced by multiple simulated runs.
 
-n_runs = 30          # number of simulated trajectories (train on n_runs-1, test on last)
+n_runs = 50          # number of simulated trajectories (train on n_runs-1, test on last)
 traj_id = 2         # which trajectory type to use from quad_sim (1: helical or 2: figure eight)
 
 quad = quad_sim()
