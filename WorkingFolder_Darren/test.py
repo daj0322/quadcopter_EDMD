@@ -33,7 +33,7 @@ butter_cutoff = 2.0
 # We keep the structure: "all_files" is replaced by multiple simulated runs.
 
 n_runs = 5          # number of simulated trajectories (train on n_runs-1, test on last)
-traj_id = 1         # which trajectory type to use from quad_sim (1: helical or 2: figure eight)
+traj_id = 2         # which trajectory type to use from quad_sim (1: helical or 2: figure eight)
 
 quad = quad_sim()
 t_all, states_all, U_all, ref_traj_list = quad.fct_run_simulation(traj_id, n_runs)
@@ -201,7 +201,7 @@ ax.set_zlabel("Z [m]")
 ax.set_title("Reference trajectory used for test run (world frame)")
 ax.legend()
 ax.grid(True)
-plt.show()
+# plt.show()
 
 # ====================================================
 # Plot simulation response vs reference trajectory (WORLD FRAME)
@@ -220,7 +220,7 @@ ax.set_zlabel("Z [m]")
 ax.set_title("Simulation response vs reference (world frame)")
 ax.legend()
 ax.grid(True)
-plt.show()
+# plt.show()
 
 M = states_test.shape[0]
 
@@ -256,7 +256,25 @@ ax.set_zlabel("Z [m]")
 ax.set_title("EDMD predicted trajectory (test run, world frame)")
 ax.legend()
 ax.grid(True)
-plt.show()
+# plt.show()
+
+# ====================================================
+# Plot results
+# ====================================================
+labels = ['x','y','z','vx','vy','vz','phi','theta','psi','p','q','r']
+units  = ['m','m','m','m/s','m/s','m/s','deg','deg','deg','rad/s','rad/s','rad/s']
+
+fig, axs = plt.subplots(3, 4, figsize=(16, 9))
+for i, ax in enumerate(axs.flatten()):
+    rmse = np.sqrt(np.mean((states_test[:, i] - x_pred[i])**2))
+    ax.plot(t_test, states_test[:, i], label='True')
+    ax.set_title(f"{labels[i]} (RMSE {rmse:.3f})")
+    ax.set_xlabel('Time [s]')
+    ax.set_ylabel(f"{labels[i]} [{units[i]}]")
+    ax.grid(True)
+    ax.legend()
+plt.tight_layout()
+# plt.show()
 
 # ====================================================
 # Plot results
