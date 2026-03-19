@@ -324,6 +324,21 @@ class quad_sim:
         """
         Run n simulations cycling through available trajectory types.
 
+        - Suppose you have traj_ids = [1, 2, 3, ..., T] (T traj types).
+        - For a given call with n runs:
+            n = T   -> one of each trajectory
+            n = 2T  -> two of each (full cycle twice)
+            n = T+k -> one of each, then first k again
+            n < T   -> only the first n trajectories in the list
+
+        The argument 'traj' is treated as a 1-based starting index
+        into the traj_ids list (usually 1 if you just want to start
+        from the first trajectory type).
+
+        All runs start from:
+            state = 0
+            trajectory start = (0,0,0)
+
         Returns
         -------
         t : (n, T)
@@ -335,12 +350,13 @@ class quad_sim:
         import random
 
         # ---------------------------------------------------------
-        # List of trajectory types available
-        # Add more numbers here if you create more trajectory types
+        # List of available trajectory types
+        # Add more numbers here as you create more trajectory families
         # ---------------------------------------------------------
-        traj_ids = [1, 2]
+        traj_ids = [1, 2]     # 1: helical, 2: figure-8
         num_traj_types = len(traj_ids)
 
+        # Convert 'traj' (1-based) to 0-based starting offset
         start_index = (traj - 1) % num_traj_types
 
         t_runs = []
@@ -350,13 +366,12 @@ class quad_sim:
 
         for i in range(n):
 
-            # Cycle through trajectory types
+            # Choose which trajectory type this run should use
             traj_id = traj_ids[(start_index + i) % num_traj_types]
 
             # =====================================================
-            # Build random trajectory parameters
+            # 1) Build a NEW random reference trajectory
             # =====================================================
-
             if traj_id == 1:
                 ref_traj = self.fct_make_helical_trajectory(
                     self.time,
@@ -380,43 +395,25 @@ class quad_sim:
                 )
 
             else:
-                raise ValueError("Unknown trajectory id")
+                raise ValueError(f"Unknown trajectory id: {traj_id}")
+
+            # =====================================================
+            # 2) Shift trajectory so it starts at (0,0,0)
+            # =====================================================
+            p0 = ref_traj[0]["pos"].copy()
+            for k in range(len(ref_traj)):
+                ref_traj[k]["pos"] = ref_traj[k]["pos"] - p0
 
             ref_traj_list.append(ref_traj)
 
             # =====================================================
-            # Choose a random starting point on the trajectory
+            # 3) Initial state = all zeros
             # =====================================================
-
-            k0 = np.random.randint(0, len(self.time))
-
-            pos0 = ref_traj[k0]["pos"].copy()
-            vel0 = ref_traj[k0]["vel"].copy()
-            yaw0 = ref_traj[k0]["yaw"]
-
-            # Small perturbations
-            pos0 += np.random.normal(0,0.1,3)
-            vel0 += np.random.normal(0,0.05,3)
-
-            phi0 = np.random.normal(0,np.deg2rad(5))
-            theta0 = np.random.normal(0,np.deg2rad(5))
-            psi0 = yaw0 + np.random.normal(0,np.deg2rad(5))
-
-            # =====================================================
-            # Build initial state
-            # =====================================================
-
             init_state = np.zeros(12)
-            init_state[0:3] = pos0
-            init_state[3:6] = vel0
-            init_state[6] = phi0
-            init_state[7] = theta0
-            init_state[8] = psi0
 
             # =====================================================
-            # Run simulation
+            # 4) Simulate this run
             # =====================================================
-
             t_i, states_i, omegas_i, U_i = self.sim_PID.fct_simulate(
                 self.time, self.dt, ref_traj, init_state
             )
@@ -426,11 +423,10 @@ class quad_sim:
             U_runs.append(U_i)
 
         # =====================================================
-        # Stack runs
+        # 5) Stack into arrays (n, T, ·) like before
         # =====================================================
-
-        t = np.stack(t_runs, axis=0)
-        states = np.stack(states_runs, axis=0)
-        U = np.stack(U_runs, axis=0)
+        t = np.stack(t_runs, axis=0)        # (n, T)
+        states = np.stack(states_runs, 0)   # (n, T, 12)
+        U = np.stack(U_runs, 0)             # (n, T, n_inputs)
 
         return t, states, U, ref_traj_list
