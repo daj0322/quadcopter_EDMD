@@ -436,3 +436,32 @@ class quad_sim:
     #     U = np.stack(U_runs, axis=0)
 
     #     return t, states, U, ref_traj_list
+
+    def fct_save_simulation_runs(self, traj, n, filename="saved_runs.pkl"):
+        """
+        Run simulation using the current deterministic randomized
+        fct_run_simulation(...) and save the results to a pickle file.
+
+        This preserves the exact same trajectory generation behavior
+        as the current fct_run_simulation method.
+        """
+        import pickle
+
+        # Use the existing simulation function exactly as-is
+        t, states, U, ref_traj_list = self.fct_run_simulation(traj, n)
+
+        data = {
+            "traj": traj,
+            "n": n,
+            "sim_dt": self.dt,
+            "time": self.time,
+            "t": t,
+            "states": states,
+            "U": U,
+            "ref_traj_list": ref_traj_list,
+        }
+
+        with open(filename, "wb") as f:
+            pickle.dump(data, f)
+
+        print(f"Saved simulation runs to {filename}")

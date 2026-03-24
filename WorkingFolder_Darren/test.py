@@ -32,42 +32,47 @@ butter_cutoff = 2.0
 # Instead of reading CSV files, generate trajectories with quad_sim.
 # We keep the structure: "all_files" is replaced by multiple simulated runs.
 
-n_runs = 20          # number of simulated trajectories (train on n_runs-1, test on last)
+n_runs = 5          # number of simulated trajectories (train on n_runs-1, test on last)
 traj_id = 1         # which trajectory type to use from quad_sim (1: helical or 2: figure eight)
 
-quad = quad_sim()
-t_all, states_all, U_all, ref_traj_list = quad.fct_run_simulation(traj_id, n_runs)
+def load_simulation_runs(filename="saved_runs.pkl"):
+    import pickle
+
+    with open(filename, "rb") as f:
+        data = pickle.load(f)
+
+    return data["t"], data["states"], data["U"], data["ref_traj_list"]
+
+t_all, states_all, U_all, ref_traj_list = load_simulation_runs("runs_traj2_n15.pkl")
 
 # ====================================================
 # Downsample simulation data to match EDMD time step
 # ====================================================
-sim_dt = quad.dt   # simulation time step (always 0.01 here)
+
+# Get simulation dt directly from time vector (works even when loading from file)
+sim_dt = t_all[0, 1] - t_all[0, 0]
 
 ratio = dt / sim_dt
 step = int(round(ratio))
 
-if not np.isclose(ratio, step):
+if not np.isclose(ratio, step, rtol=1e-6, atol=1e-8):
     raise ValueError(
         f"EDMD dt={dt} must be an integer multiple of simulation dt={sim_dt}"
     )
 
-# Keep every 'step' sample
-t_all = t_all[:, ::step]
-states_all = states_all[:, ::step, :]
-U_all = U_all[:, ::step, :]
+print(f"Downsampling: sim_dt={sim_dt}, edmd_dt={dt}, step={step}")
 
-# Downsample reference trajectories the same way
-ref_traj_list_ds = []
-for ref_traj in ref_traj_list:
-    ref_traj_list_ds.append(ref_traj[::step])
+# Use explicit indices (safer and consistent)
+idx = np.arange(0, t_all.shape[1], step)
 
-ref_traj_list = ref_traj_list_ds
+t_all = t_all[:, idx]
+states_all = states_all[:, idx, :]
+U_all = U_all[:, idx, :]
 
-# t_all.shape      = (n_runs, T)
-# states_all.shape = (n_runs, T, 12)
-# U_all.shape      = (n_runs, T, n_inputs)
+# Downsample reference trajectories
+ref_traj_list = [ref_traj[::step] for ref_traj in ref_traj_list]
 
-print(f"Generated {n_runs} simulated trajectories from quad_sim.")
+print(f"Downsampled shape: {states_all.shape}")
 
 # ====================================================
 # Build snapshots for EDMDc
