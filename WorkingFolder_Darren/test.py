@@ -16,7 +16,7 @@ from Simulation import quad_sim
 SCRIPT_DIR = Path(__file__).resolve().parent
 DATA_DIR = SCRIPT_DIR  # change if CSVs are in a subfolder
 noise_std = 0.0    # Gaussian noise std; 0 to disable
-dt = 0.01               # time step (s)
+dt = 0.1               # time step (s)
 
 enable_filter = True
 filter_type = 'savgol'  # 'savgol' or 'butter'
@@ -32,11 +32,37 @@ butter_cutoff = 2.0
 # Instead of reading CSV files, generate trajectories with quad_sim.
 # We keep the structure: "all_files" is replaced by multiple simulated runs.
 
-n_runs = 5          # number of simulated trajectories (train on n_runs-1, test on last)
-traj_id = 2         # which trajectory type to use from quad_sim (1: helical or 2: figure eight)
+n_runs = 20          # number of simulated trajectories (train on n_runs-1, test on last)
+traj_id = 1         # which trajectory type to use from quad_sim (1: helical or 2: figure eight)
 
 quad = quad_sim()
 t_all, states_all, U_all, ref_traj_list = quad.fct_run_simulation(traj_id, n_runs)
+
+# ====================================================
+# Downsample simulation data to match EDMD time step
+# ====================================================
+sim_dt = quad.dt   # simulation time step (always 0.01 here)
+
+ratio = dt / sim_dt
+step = int(round(ratio))
+
+if not np.isclose(ratio, step):
+    raise ValueError(
+        f"EDMD dt={dt} must be an integer multiple of simulation dt={sim_dt}"
+    )
+
+# Keep every 'step' sample
+t_all = t_all[:, ::step]
+states_all = states_all[:, ::step, :]
+U_all = U_all[:, ::step, :]
+
+# Downsample reference trajectories the same way
+ref_traj_list_ds = []
+for ref_traj in ref_traj_list:
+    ref_traj_list_ds.append(ref_traj[::step])
+
+ref_traj_list = ref_traj_list_ds
+
 # t_all.shape      = (n_runs, T)
 # states_all.shape = (n_runs, T, 12)
 # U_all.shape      = (n_runs, T, n_inputs)
@@ -186,29 +212,15 @@ U_test = U_all[n_runs - 1]                    # (M, n_inputs)
 ref_test = ref_traj_list[n_runs - 1]
 
 # ====================================================
-# Plot reference trajectory for the test run (WORLD FRAME)
-# ====================================================
-xr = np.array([r["pos"][0] for r in ref_test], dtype=float)
-yr = np.array([r["pos"][1] for r in ref_test], dtype=float)
-zr = np.array([r["pos"][2] for r in ref_test], dtype=float)
-
-fig = plt.figure()
-ax = fig.add_subplot(111, projection="3d")
-ax.plot(xr, yr, zr, '--', linewidth=2, label="Reference trajectory")
-ax.set_xlabel("X [m]")
-ax.set_ylabel("Y [m]")
-ax.set_zlabel("Z [m]")
-ax.set_title("Reference trajectory used for test run (world frame)")
-ax.legend()
-ax.grid(True)
-# plt.show()
-
-# ====================================================
 # Plot simulation response vs reference trajectory (WORLD FRAME)
 # ====================================================
 x_sim = states_test[:, 0]
 y_sim = states_test[:, 1]
 z_sim = states_test[:, 2]
+
+xr = np.array([r["pos"][0] for r in ref_test], dtype=float)
+yr = np.array([r["pos"][1] for r in ref_test], dtype=float)
+zr = np.array([r["pos"][2] for r in ref_test], dtype=float)
 
 fig = plt.figure()
 ax = fig.add_subplot(111, projection="3d")
@@ -241,19 +253,24 @@ for k in range(1, M):
 x_pred = scaler.inverse_transform(Psi_pred[:12, :].T).T
 
 # ====================================================
-# Plot EDMD predicted trajectory (3D) for the test run (WORLD FRAME)
+# Plot simulation response and EDMD predicted trajectory (3D)
 # ====================================================
 x_edmd = x_pred[0, :]
 y_edmd = x_pred[1, :]
 z_edmd = x_pred[2, :]
 
+x_sim = states_test[:, 0]
+y_sim = states_test[:, 1]
+z_sim = states_test[:, 2]
+
 fig = plt.figure()
 ax = fig.add_subplot(111, projection="3d")
-ax.plot(x_edmd, y_edmd, z_edmd, linewidth=2, label="EDMD predicted trajectory")
+ax.plot(x_sim, y_sim, z_sim, linewidth=2, label="Simulation response")
+ax.plot(x_edmd, y_edmd, z_edmd, '--', linewidth=2, label="EDMD predicted trajectory")
 ax.set_xlabel("X [m]")
 ax.set_ylabel("Y [m]")
 ax.set_zlabel("Z [m]")
-ax.set_title("EDMD predicted trajectory (test run, world frame)")
+ax.set_title("Simulation response and EDMD prediction (world frame)")
 ax.legend()
 ax.grid(True)
 # plt.show()
