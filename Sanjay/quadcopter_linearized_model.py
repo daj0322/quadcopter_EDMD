@@ -27,7 +27,7 @@ def quadcopter_linearized_model(m, g, Ixx, Iyy, Izz, kv, kw, Ts=None):
     State:  x = [x, y, z, vx, vy, vz, phi, theta, psi, p, q, r]
     Input:  delta_u = u - u_star,  u_star = [mg, 0, 0, 0]^T
     """
-    # Damping rates (Eq. 28)
+    # Damping rates (Eq. 28)a
     dv = kv / m
     Dw = np.diag([kw / Ixx, kw / Iyy, kw / Izz])
 

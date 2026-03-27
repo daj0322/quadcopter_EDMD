@@ -33,7 +33,7 @@ butter_cutoff = 2.0
 # Instead of reading CSV files, generate trajectories with quad_sim.
 # We keep the structure: "all_files" is replaced by multiple simulated runs.
 
-n_runs = 200          # number of simulated trajectories (train on n_runs-1, test on last)
+n_runs = 300          # number of simulated trajectories (train on n_runs-1, test on last)
 test_idx = 199
 traj_id = 2        # which trajectory type to use from quad_sim (1: helical or 2: figure eight)
 
@@ -45,7 +45,7 @@ def load_simulation_runs(filename="saved_runs.pkl"):
 
     return data["t"], data["states"], data["U"], data["ref_traj_list"]
 
-t_all, states_all, U_all, ref_traj_list = load_simulation_runs("runs_traj2_n200.pkl")
+t_all, states_all, U_all, ref_traj_list = load_simulation_runs("runs_traj2_plus_hover_n300.pkl")
 
 print("Loaded trajectory type:", traj_id)
 print("Configured n_runs:", n_runs)
@@ -53,6 +53,10 @@ print("Loaded t shape:", t_all.shape)
 print("Loaded states shape:", states_all.shape)
 print("Loaded U shape:", U_all.shape)
 print("Loaded ref count:", len(ref_traj_list))
+print("\nAngle/unit sanity check:")
+print("phi min/max:", np.min(states_all[:, :, 6]), np.max(states_all[:, :, 6]))
+print("theta min/max:", np.min(states_all[:, :, 7]), np.max(states_all[:, :, 7]))
+print("psi min/max:", np.min(states_all[:, :, 8]), np.max(states_all[:, :, 8]))
 
 # ====================================================
 # Downsample simulation data to match EDMD time step
@@ -203,20 +207,17 @@ def observables(x):
     #    - you already had sin/cos(yaw)
     #    - add sin/cos for roll (phi) and pitch (theta) too
     # ----------------------------------------------------
-    # Un-standardize yaw to get back to degrees for trigs,
-    # same as your original code. (psi index = 8)
+    # Un-standardize angles and use them directly in radians
     yaw_std = x[8]
-    yaw_raw = yaw_std * scaler.scale_[8] + scaler.mean_[8]  # deg
-    yaw_rad = np.deg2rad(yaw_raw)
+    yaw_raw = yaw_std * scaler.scale_[8] + scaler.mean_[8]
+    yaw_rad = yaw_raw
 
-    # For phi, theta you likely stored them in degrees originally,
-    # standardized by 'scaler', so we unscale similarly:
     phi_std = x[6]
     theta_std = x[7]
     phi_raw = phi_std * scaler.scale_[6] + scaler.mean_[6]
     theta_raw = theta_std * scaler.scale_[7] + scaler.mean_[7]
-    phi_rad = np.deg2rad(phi_raw)
-    theta_rad = np.deg2rad(theta_raw)
+    phi_rad = phi_raw
+    theta_rad = theta_raw
 
     s_yaw, c_yaw = np.sin(yaw_rad), np.cos(yaw_rad)
     s_phi, c_phi = np.sin(phi_rad), np.cos(phi_rad)
@@ -454,10 +455,10 @@ model_data = {
     "scaler": scaler,
     "u_scaler": u_scaler,
     "dt": dt,
-    "source_file": "runs_traj2_n200.pkl",
+    "source_file": "runs_traj2_plus_hover_n300.pkl",
 }
 
-with open("edmdc_model_traj2_n200.pkl", "wb") as f:
+with open("edmdc_model_traj2_plus_hover_n300.pkl", "wb") as f:
     pickle.dump(model_data, f)
 
-print("Saved model to edmdc_model_traj2_n200.pkl")
+print("Saved model to edmdc_model_traj2_plus_hover_n300.pkl")

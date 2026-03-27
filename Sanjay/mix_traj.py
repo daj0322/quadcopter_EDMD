@@ -8,6 +8,31 @@ def load_simulation_runs(filename):
         return pickle.load(f)
 
 
+def infer_family_label(data, filename):
+    # Prefer explicit traj code if available
+    traj = data.get("traj", None)
+
+    if traj == 1:
+        return "helix"
+    elif traj == 2:
+        return "fig8"
+    elif traj == 3:
+        return "hover_excitation"
+    elif isinstance(traj, str):
+        return traj
+
+    # Fallback: infer from filename
+    name = Path(filename).stem.lower()
+    if "traj1" in name or "helix" in name:
+        return "helix"
+    if "traj2" in name or "fig8" in name:
+        return "fig8"
+    if "hover" in name or "excitation" in name:
+        return "hover_excitation"
+
+    return "unknown"
+
+
 def combine_run_files(file1, file2, output_file):
     data1 = load_simulation_runs(file1)
     data2 = load_simulation_runs(file2)
@@ -43,12 +68,14 @@ def combine_run_files(file1, file2, output_file):
     t_combined = np.concatenate([data1["t"], data2["t"]], axis=0)
     states_combined = np.concatenate([data1["states"], data2["states"]], axis=0)
     U_combined = np.concatenate([data1["U"], data2["U"]], axis=0)
-    ref_combined = data1["ref_traj_list"] + data2["ref_traj_list"]
+    ref_combined = list(data1["ref_traj_list"]) + list(data2["ref_traj_list"])
 
-    # Optional family labels so later you know which run came from which set
+    label1 = infer_family_label(data1, file1)
+    label2 = infer_family_label(data2, file2)
+
     family_labels = (
-        ["helix"] * data1["n"] +
-        ["fig8"] * data2["n"]
+        [label1] * data1["n"] +
+        [label2] * data2["n"]
     )
 
     combined_data = {
@@ -74,11 +101,12 @@ def combine_run_files(file1, file2, output_file):
     print(f"U shape: {combined_data['U'].shape}")
     print(f"ref_traj_list length: {len(combined_data['ref_traj_list'])}")
     print(f"family_labels length: {len(combined_data['family_labels'])}")
+    print(f"labels used: {label1}, {label2}")
 
 
 if __name__ == "__main__":
     combine_run_files(
-        "runs_traj1_n50.pkl",
-        "runs_traj2_n50.pkl",
-        "runs_mixed_n400.pkl"
+        "runs_traj2_n200.pkl",
+        "runs_hover_excitation_n100.pkl",
+        "runs_traj2_plus_hover_n300.pkl"
     )
