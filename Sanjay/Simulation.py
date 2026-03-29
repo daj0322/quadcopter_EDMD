@@ -42,7 +42,7 @@ class quad_sim:
 
     # Time setup
     dt = 0.01
-    time = np.arange(0.0, 35.0, dt)
+    time = np.arange(0.0, 100.0, dt)
 
     def fct_make_helical_trajectory(self, time,
                                     center=(0.0, 0.0),
@@ -317,7 +317,7 @@ class quad_sim:
 
             init_state = np.zeros(12)
 
-            t_i, states_i, omegas_i, U_i = self.sim_PID.fct_simulate(
+            t_i, states_i, omegas_i, _, U_i = self.sim_PID.fct_simulate(
                 self.time, self.dt, ref_traj, init_state
             )
 
@@ -354,6 +354,80 @@ class quad_sim:
         print("t shape:", t.shape)
         print("states shape:", states.shape)
         print("U shape:", U.shape)
+
+    def fct_make_lissajous_trajectory(self, time,
+                                      center=(0.0, 0.0, 2.0),
+                                      ax=2.0, ay=1.5, az=1.0,
+                                      fx=1.0, fy=2.0, fz=3.0,
+                                      phase_y=np.pi / 2, phase_z=np.pi / 4,
+                                      n_loops=1.0,
+                                      yaw_follows_path=True):
+        time = np.asarray(time, dtype=float)
+        t0 = float(time[0])
+        T = float(time[-1] - time[0])
+        cx, cy, cz = map(float, center)
+        omega = 2.0 * np.pi * n_loops / T
+
+        traj = []
+        for t in time:
+            tr = t - t0
+            x = cx + ax * np.sin(fx * omega * tr)
+            y = cy + ay * np.sin(fy * omega * tr + phase_y)
+            z = cz + az * np.sin(fz * omega * tr + phase_z)
+
+            vx = ax * fx * omega * np.cos(fx * omega * tr)
+            vy = ay * fy * omega * np.cos(fy * omega * tr + phase_y)
+            vz = az * fz * omega * np.cos(fz * omega * tr + phase_z)
+
+            yaw = np.arctan2(vy, vx) if yaw_follows_path else 0.0
+
+            traj.append({
+                "pos": np.array([x, y, z], dtype=float),
+                "vel": np.array([vx, vy, vz], dtype=float),
+                "yaw": float(yaw)
+            })
+        return traj
+
+    def fct_make_random_waypoint_trajectory(self, time, rng,
+                                            n_waypoints=8,
+                                            xy_range=3.0,
+                                            z_range=(0.5, 4.0),
+                                            smooth_sigma=50):
+        from scipy.ndimage import gaussian_filter1d
+
+        time = np.asarray(time, dtype=float)
+        T = len(time)
+
+        wp_x = [rng.uniform(-xy_range, xy_range) for _ in range(n_waypoints)]
+        wp_y = [rng.uniform(-xy_range, xy_range) for _ in range(n_waypoints)]
+        wp_z = [rng.uniform(*z_range) for _ in range(n_waypoints)]
+
+        wp_idx = np.linspace(0, T - 1, n_waypoints).astype(int)
+        x_raw = np.interp(np.arange(T), wp_idx, wp_x)
+        y_raw = np.interp(np.arange(T), wp_idx, wp_y)
+        z_raw = np.interp(np.arange(T), wp_idx, wp_z)
+
+        x = gaussian_filter1d(x_raw, smooth_sigma)
+        y = gaussian_filter1d(y_raw, smooth_sigma)
+        z = gaussian_filter1d(z_raw, smooth_sigma)
+
+        vx = np.gradient(x, self.dt)
+        vy = np.gradient(y, self.dt)
+        vz = np.gradient(z, self.dt)
+
+        traj = []
+        for k in range(T):
+            traj.append({
+                "pos": np.array([x[k], y[k], z[k]], dtype=float),
+                "vel": np.array([vx[k], vy[k], vz[k]], dtype=float),
+                "yaw": float(np.arctan2(vy[k], vx[k]))
+            })
+
+        p0 = traj[0]["pos"].copy()
+        for k in range(T):
+            traj[k]["pos"] = traj[k]["pos"] - p0
+
+        return traj
 
 
 
@@ -406,32 +480,7 @@ class quad_sim:
             # =====================================================
             # Generate trajectory
             # =====================================================
-            if traj == 1:
-
-                ref_traj = self.fct_make_helical_trajectory(
-                    self.time,
-                    center=(0.0, 0.0),
-                    radius=rng.uniform(1, 5),
-                    z_start=0.0,
-                    z_end=rng.uniform(5, 10),
-                    n_turns=1,
-                    yaw_follows_path=True
-                )
-
-            elif traj == 2:
-
-                ref_traj = self.fct_make_figure8_trajectory(
-                    self.time,
-                    center=(0.0, 0.0, 0.0),
-                    a=rng.uniform(1, 5),
-                    b=rng.uniform(1, 5),
-                    n_loops=1,
-                    tilt_deg=rng.uniform(10, 80),
-                    yaw_follows_path=True
-                )
-
-            else:
-                raise ValueError("traj must be 1 or 2")
+            ref_traj = self.fct_sample_trajectory(traj, rng)
 
             # =====================================================
             # Shift trajectory so it starts at (0,0,0)
@@ -451,7 +500,7 @@ class quad_sim:
             # =====================================================
             # Run simulation
             # =====================================================
-            t_i, states_i, omegas_i, U_i = self.sim_PID.fct_simulate(
+            t_i, states_i, omegas_i, _, U_i = self.sim_PID.fct_simulate(
                 self.time, self.dt, ref_traj, init_state
             )
 
@@ -572,6 +621,67 @@ class quad_sim:
     #     U = np.stack(U_runs, axis=0)
 
     #     return t, states, U, ref_traj_list
+
+    def fct_sample_trajectory(self, traj, rng):
+        if traj == 1:
+            return self.fct_make_helical_trajectory(
+                self.time, center=(0.0, 0.0),
+                radius=rng.uniform(3, 10),
+                z_start=0.0,
+                z_end=rng.uniform(3, 10),
+                n_turns=1,
+                yaw_follows_path=True
+            )
+        elif traj == 2:
+            return self.fct_make_figure8_trajectory(
+                self.time, center=(0.0, 0.0, 0.0),
+                a=rng.uniform(25, 35),
+                b=rng.uniform(25, 35),
+                n_loops=1,
+                tilt_deg=rng.uniform(10, 80),
+                yaw_follows_path=True
+            )
+        elif traj == 3:
+            return self.fct_make_lissajous_trajectory(
+                self.time,
+                center=(0.0, 0.0, rng.uniform(1.0, 4.0)),
+                ax=rng.uniform(15, 25),
+                ay=rng.uniform(15, 25),
+                az=rng.uniform(3, 7),
+                fx=rng.choice([1, 2, 3]),
+                fy=rng.choice([1, 2, 3]),
+                fz=rng.choice([1, 2, 3]),
+                phase_y=rng.uniform(0, np.pi),
+                phase_z=rng.uniform(0, np.pi),
+                n_loops=1.0,
+                yaw_follows_path=True
+            )
+        elif traj == 4:
+            return self.fct_make_random_waypoint_trajectory(
+                self.time, rng=rng,
+                n_waypoints=rng.randint(5, 15),
+                xy_range=rng.uniform(15, 25),
+                z_range=(0.5, rng.uniform(3.0, 8.0)),
+                smooth_sigma=rng.randint(25, 50)
+            )
+        elif traj == 5:
+            return self.fct_make_hover_excitation_trajectory(
+                self.time, rng=rng,
+                xyz_amp=(
+                    rng.uniform(2.0, 4.0),
+                    rng.uniform(2.0, 4.0),
+                    rng.uniform(1.0, 2.0),
+                ),
+                xyz_freq=(
+                    rng.uniform(0.05, 0.12),
+                    rng.uniform(0.05, 0.12),
+                    rng.uniform(0.06, 0.15),
+                ),
+                yaw_amp_deg=rng.uniform(2.0, 8.0),
+                n_sines_range=(2, 4),
+            )
+        else:
+            raise ValueError(f"Unknown traj: {traj}")
 
     def fct_save_simulation_runs(self, traj, n, filename="saved_runs.pkl"):
         """

@@ -15,56 +15,65 @@ from Simulation import quad_sim
 # CONFIG
 # ====================================================
 SCRIPT_DIR = Path(__file__).resolve().parent
-DATA_DIR = SCRIPT_DIR  # change if CSVs are in a subfolder
-noise_std = 0.00    # Gaussian noise std; 0 to disable
-dt = 0.01               # time step (s)
+DATA_DIR = SCRIPT_DIR
+noise_std = 0.00
+dt = 0.01               # EDMD time step (s)
 
 enable_filter = True
-filter_type = 'savgol'  # 'savgol' or 'butter'
-savgol_window = 11      # must be odd
+filter_type = 'savgol'
+savgol_window = 11
 savgol_poly = 3
 butter_order = 2
 butter_cutoff = 2.0
 
 # ====================================================
-# Collect all CSVs   (REPLACED BY QUAD SIM TRAJECTORIES)
+# Load simulation data
 # ====================================================
 
-# Instead of reading CSV files, generate trajectories with quad_sim.
-# We keep the structure: "all_files" is replaced by multiple simulated runs.
-
-n_runs = 300          # number of simulated trajectories (train on n_runs-1, test on last)
-test_idx = 199
-traj_id = 2        # which trajectory type to use from quad_sim (1: helical or 2: figure eight)
-
-def load_simulation_runs(filename="saved_runs.pkl"):
+def load_simulation_runs(filename):
     import pickle
-
     with open(filename, "rb") as f:
         data = pickle.load(f)
-
     return data["t"], data["states"], data["U"], data["ref_traj_list"]
 
-t_all, states_all, U_all, ref_traj_list = load_simulation_runs("runs_traj2_plus_hover_n300.pkl")
+t_all, states_all, U_all, ref_traj_list = load_simulation_runs("runs_mixed_n300.pkl")
 
-print("Loaded trajectory type:", traj_id)
-print("Configured n_runs:", n_runs)
-print("Loaded t shape:", t_all.shape)
-print("Loaded states shape:", states_all.shape)
-print("Loaded U shape:", U_all.shape)
-print("Loaded ref count:", len(ref_traj_list))
+n_runs   = t_all.shape[0]
+test_idx = 99
+
+print("Loaded file: runs_mixedu_n350.pkl")
+print("Total runs:", n_runs)
+print("Test index:", test_idx)
+print("t shape:", t_all.shape)
+print("states shape (raw 12):", states_all.shape)
+print("U shape (raw):", U_all.shape)
+print("ref count:", len(ref_traj_list))
+
+
+print(f"\nTrimmed states to 10: {states_all.shape}")
+
+# ====================================================
+# Drop psi_des(3) — keep 3 inputs
+# [thrust, phi_des, theta_des]
+# ====================================================
+U_all = U_all[:, :, :3]
+print(f"Trimmed U to 3: {U_all.shape}")
+
 print("\nAngle/unit sanity check:")
 print("phi min/max:", np.min(states_all[:, :, 6]), np.max(states_all[:, :, 6]))
 print("theta min/max:", np.min(states_all[:, :, 7]), np.max(states_all[:, :, 7]))
-print("psi min/max:", np.min(states_all[:, :, 8]), np.max(states_all[:, :, 8]))
+print("p min/max:", np.min(states_all[:, :, 8]), np.max(states_all[:, :, 8]))
+print("q min/max:", np.min(states_all[:, :, 9]), np.max(states_all[:, :, 9]))
+
+print("\nU sanity check:")
+print("thrust min/max:", np.min(U_all[:, :, 0]), np.max(U_all[:, :, 0]))
+print("phi_des min/max:", np.min(U_all[:, :, 1]), np.max(U_all[:, :, 1]))
+print("theta_des min/max:", np.min(U_all[:, :, 2]), np.max(U_all[:, :, 2]))
 
 # ====================================================
 # Downsample simulation data to match EDMD time step
 # ====================================================
-
-# Get simulation dt directly from time vector (works even when loading from file)
 sim_dt = t_all[0, 1] - t_all[0, 0]
-
 ratio = dt / sim_dt
 step = int(round(ratio))
 
@@ -73,19 +82,15 @@ if not np.isclose(ratio, step, rtol=1e-6, atol=1e-8):
         f"EDMD dt={dt} must be an integer multiple of simulation dt={sim_dt}"
     )
 
-print(f"Downsampling: sim_dt={sim_dt}, edmd_dt={dt}, step={step}")
+print(f"\nDownsampling: sim_dt={sim_dt}, edmd_dt={dt}, step={step}")
 
-# Use explicit indices (safer and consistent)
 idx = np.arange(0, t_all.shape[1], step)
-
 t_all = t_all[:, idx]
 states_all = states_all[:, idx, :]
 U_all = U_all[:, idx, :]
-
-# Downsample reference trajectories
 ref_traj_list = [ref_traj[::step] for ref_traj in ref_traj_list]
 
-print(f"Downsampled shape: {states_all.shape}")
+print(f"Downsampled shape: states={states_all.shape}, U={U_all.shape}")
 
 # ====================================================
 # Build snapshots for EDMDc
@@ -94,7 +99,7 @@ Xc_list, Xn_list, U_list = [], [], []
 
 train_indices = [i for i in range(n_runs) if i != test_idx]
 
-print("Number of training runs:", len(train_indices))
+print("\nNumber of training runs:", len(train_indices))
 print("Chosen test index:", test_idx)
 
 for run in train_indices:
@@ -109,12 +114,9 @@ for run in train_indices:
     Xn_list.append(states_run[1:, :])
     U_list.append(U_run[:-1, :].T)
 
-# Stack all runs
-Xc = np.vstack(Xc_list).T          # (12, K)
-Xn = np.vstack(Xn_list).T          # (12, K)
-
-# Stack control inputs
-U_train = np.hstack(U_list)        # (n_inputs, K)
+Xc = np.vstack(Xc_list).T          # (10, K)
+Xn = np.vstack(Xn_list).T          # (10, K)
+U_train = np.hstack(U_list)        # (3, K)
 
 print("\n========== SNAPSHOT DEBUG ==========")
 print("Xc shape:", Xc.shape)
@@ -124,9 +126,14 @@ print("Number of transitions per run:", states_all.shape[1] - 1)
 print("Expected total transitions:", (n_runs - 1) * (states_all.shape[1] - 1))
 print("====================================")
 
+# ====================================================
 # Scale control inputs
+# ====================================================
+U_all_flat = U_all.reshape(-1, U_all.shape[2])
 u_scaler = StandardScaler()
-U_norm = u_scaler.fit_transform(U_train.T).T   # (n_inputs, K)
+u_scaler.fit(U_all_flat)
+U_norm = u_scaler.transform(U_train.T).T
+
 print("\n========== INPUT SCALER DEBUG ==========")
 print("Input scaler mean:", u_scaler.mean_)
 print("Input scaler scale:", u_scaler.scale_)
@@ -134,14 +141,15 @@ print("Scaled U_train mean (approx):", np.mean(U_norm, axis=1))
 print("Scaled U_train std  (approx):", np.std(U_norm, axis=1))
 print("========================================")
 
-
 # ====================================================
 # Scale states
 # ====================================================
+X_all_flat = states_all.reshape(-1, states_all.shape[2])
 scaler = StandardScaler()
-
-Xc_s = scaler.fit_transform(Xc.T).T
+scaler.fit(X_all_flat)
+Xc_s = scaler.transform(Xc.T).T
 Xn_s = scaler.transform(Xn.T).T
+
 print("\n========== STATE SCALER DEBUG ==========")
 print("State scaler mean:", scaler.mean_)
 print("State scaler scale:", scaler.scale_)
@@ -151,87 +159,71 @@ print("Scaled Xn mean (approx):", np.mean(Xn_s, axis=1))
 print("Scaled Xn std  (approx):", np.std(Xn_s, axis=1))
 print("========================================")
 
+# ====================================================
+# Observables
+# ====================================================
+# State indices (after trimming):
+#   0:x  1:y  2:z  3:vx  4:vy  5:vz  6:phi  7:theta  8:p  9:q
+#
+# Observables:
+#   [0-9]   10 linear states
+#   [10-13] sin(phi), cos(phi), sin(theta), cos(theta)
+#   [14-17] phi*p, theta*q, vx*phi, vy*theta  (cross terms)
+#   [18]    v_sq = vx^2 + vy^2 + vz^2
+#   [19]    omega_sq = p^2 + q^2
+#   [20]    bias
+#
+# Total: 21 observables — small enough for MPC QP
 
-# ====================================================
-# Extended observables (reduced to avoid overflow)
-# ====================================================
 def observables(x):
     """
-    Lifted observables for EDMD/EDMDc.
+    Lifted observables for EDMDc.
 
-    x is expected to be a *standardized* state vector of length 12:
-        [x, y, z, vx, vy, vz, phi, theta, psi, p, q, r]
+    x: standardized 10-state vector
+       [x, y, z, vx, vy, vz, phi, theta, p, q]
     """
     x = np.asarray(x).flatten()
-    n = len(x)
-    assert n == 12, f"Expected 12-state vector, got {n}"
+    assert len(x) == 10, f"Expected 10-state vector, got {len(x)}"
 
-    # ----------------------------------------------------
-    # 1) Linear terms (same as before)
-    # ----------------------------------------------------
-    obs = list(x)
+    obs = list(x)  # 10 linear terms
 
-    # ----------------------------------------------------
-    # 2) Quadratic terms (same as before)
-    #    all x_i * x_j with i <= j
-    # ----------------------------------------------------
-    for i, j in itertools.combinations_with_replacement(range(n), 2):
-        obs.append(x[i] * x[j])
+    # ----- Trig terms (unscale to radians first) -----
+    phi_rad   = x[6] * scaler.scale_[6] + scaler.mean_[6]
+    theta_rad = x[7] * scaler.scale_[7] + scaler.mean_[7]
 
-    # ----------------------------------------------------
-    # 3) Selected cubic terms
-    #    - positions: x,y,z (0,1,2)
-    #    - velocities: vx,vy,vz (3,4,5)
-    #    These are often the most important for trajectories.
-    # ----------------------------------------------------
-    pos_vel_indices = [0, 1, 2, 3, 4, 5]
-    for i in pos_vel_indices:
-        xi = x[i]
-        obs.append(xi**3)
+    s_phi   = np.sin(phi_rad)
+    c_phi   = np.cos(phi_rad)
+    s_theta = np.sin(theta_rad)
+    c_theta = np.cos(theta_rad)
 
-    # ----------------------------------------------------
-    # 4) "Energy-like" features
-    #    - translational kinetic-like: |v|^2
-    #    - angular rate "energy": p^2 + q^2 + r^2
-    # ----------------------------------------------------
-    vx, vy, vz = x[3], x[4], x[5]
-    p, q, r = x[9], x[10], x[11]
+    obs += [s_phi, c_phi, s_theta, c_theta]
 
-    v_sq = vx**2 + vy**2 + vz**2
-    omega_sq = p**2 + q**2 + r**2
+    # ----- Cross terms (angle × rate, velocity × angle) -----
+    # These capture gyroscopic coupling and velocity-tilt interaction
+    obs.append(x[6] * x[8])   # phi * p
+    obs.append(x[7] * x[9])   # theta * q
+    obs.append(x[3] * x[6])   # vx * phi
+    obs.append(x[4] * x[7])   # vy * theta
+
+    # ----- Energy-like terms -----
+    v_sq = x[3]**2 + x[4]**2 + x[5]**2
+    omega_sq = x[8]**2 + x[9]**2
     obs.append(v_sq)
     obs.append(omega_sq)
 
-    # ----------------------------------------------------
-    # 5) Extra trig terms for angles
-    #    - you already had sin/cos(yaw)
-    #    - add sin/cos for roll (phi) and pitch (theta) too
-    # ----------------------------------------------------
-    # Un-standardize angles and use them directly in radians
-    yaw_std = x[8]
-    yaw_raw = yaw_std * scaler.scale_[8] + scaler.mean_[8]
-    yaw_rad = yaw_raw
-
-    phi_std = x[6]
-    theta_std = x[7]
-    phi_raw = phi_std * scaler.scale_[6] + scaler.mean_[6]
-    theta_raw = theta_std * scaler.scale_[7] + scaler.mean_[7]
-    phi_rad = phi_raw
-    theta_rad = theta_raw
-
-    s_yaw, c_yaw = np.sin(yaw_rad), np.cos(yaw_rad)
-    s_phi, c_phi = np.sin(phi_rad), np.cos(phi_rad)
-    s_theta, c_theta = np.sin(theta_rad), np.cos(theta_rad)
-
-    obs += [s_yaw, c_yaw, s_phi, c_phi, s_theta, c_theta]
-
-    # ----------------------------------------------------
-    # 6) Constant term (bias)
-    # ----------------------------------------------------
+    # ----- Bias -----
     obs.append(1.0)
 
     return np.array(obs, dtype=float)
 
+
+# Test observable dimension
+n_obs_test = len(observables(np.zeros(10)))
+print(f"\nObservable dimension: {n_obs_test}")
+
+# ====================================================
+# Lift snapshots
+# ====================================================
 Psi = np.column_stack([observables(Xc_s[:, k]) for k in range(Xc_s.shape[1])])
 Phi = np.column_stack([observables(Xn_s[:, k]) for k in range(Xn_s.shape[1])])
 
@@ -258,19 +250,17 @@ print("===================================")
 # ====================================================
 # EDMDc via pseudoinverse
 # ====================================================
-
 lam = 1e-4
 G = Omega @ Omega.T
-#AB = Phi @ Omega.T @ np.linalg.inv(G + lam * np.eye(G.shape[0]))
 AB = Phi @ pinv(Omega)
 n_obs = Psi.shape[0]
 A = AB[:, :n_obs]
 B = AB[:, n_obs:]
 
-
-#rho = np.max(np.abs(np.linalg.eigvals(A)))
-#if rho > 1:
-#    A = A / rho
+rho = np.max(np.abs(np.linalg.eigvals(A)))
+if rho > 1:
+    A = A / rho
+    print(f"Stabilized A: scaled by 1/{rho:.8f}")
 
 print("\n========== MODEL DEBUG ==========")
 print("A shape:", A.shape)
@@ -287,12 +277,24 @@ print("Any NaN in B?", np.isnan(B).any())
 print("Any Inf in B?", np.isinf(B).any())
 print("=================================")
 
+print("\n========== B ROW NORMS ==========")
+labels_10 = ['x','y','z','vx','vy','vz','phi','theta','p','q']
+for i, lbl in enumerate(labels_10):
+    print(f"  {lbl:>6s}: {np.linalg.norm(B[i,:]):.6f}")
+print("  --- lifted rows ---")
+lifted_labels = ['sin_phi','cos_phi','sin_theta','cos_theta',
+                 'phi*p','theta*q','vx*phi','vy*theta',
+                 'v_sq','omega_sq','bias']
+for i, lbl in enumerate(lifted_labels):
+    print(f"  {lbl:>12s}: {np.linalg.norm(B[10+i,:]):.6f}")
+print("==================================")
+
 # ====================================================
-# Simple prediction test (use last simulated run, unseen in training)
+# Test on held-out run
 # ====================================================
-t_test = t_all[test_idx]                    # (M,)
-states_test = states_all[test_idx].copy()   # (M, 12)
-U_test = U_all[test_idx]                    # (M, n_inputs)
+t_test = t_all[test_idx]
+states_test = states_all[test_idx].copy()    # (M, 10)
+U_test = U_all[test_idx]                     # (M, 3)
 ref_test = ref_traj_list[test_idx]
 
 print("\n========== RAW RANGE DEBUG ==========")
@@ -300,10 +302,8 @@ print("Xc min per state:", np.min(Xc, axis=1))
 print("Xc max per state:", np.max(Xc, axis=1))
 print("Xn min per state:", np.min(Xn, axis=1))
 print("Xn max per state:", np.max(Xn, axis=1))
-
 print("states_test min per state:", np.min(states_test, axis=0))
 print("states_test max per state:", np.max(states_test, axis=0))
-
 print("U_train min per input:", np.min(U_train, axis=1))
 print("U_train max per input:", np.max(U_train, axis=1))
 print("U_test min per input:", np.min(U_test, axis=0))
@@ -311,7 +311,7 @@ print("U_test max per input:", np.max(U_test, axis=0))
 print("=====================================")
 
 # ====================================================
-# Plot simulation response vs reference trajectory (WORLD FRAME)
+# Plot simulation response vs reference trajectory
 # ====================================================
 x_sim = states_test[:, 0]
 y_sim = states_test[:, 1]
@@ -331,8 +331,10 @@ ax.set_zlabel("Z [m]")
 ax.set_title("Simulation response vs reference (world frame)")
 ax.legend()
 ax.grid(True)
-# plt.show()
 
+# ====================================================
+# Rollout prediction
+# ====================================================
 M = states_test.shape[0]
 
 Psi_pred = np.zeros((n_obs, M))
@@ -340,7 +342,6 @@ Psi_pred[:, 0] = observables(
     scaler.transform(states_test[0, :].reshape(1, -1)).flatten()
 )
 
-# Predict while clipping to prevent overflow
 clip_value = 1e6
 for k in range(1, M):
     u_k = U_test[k-1, :].reshape(1, -1)
@@ -355,18 +356,15 @@ for k in range(1, M):
         print("max |Psi_pred[:,k]| =", np.max(np.abs(Psi_pred[:, k])))
         print("u_k_s =", u_k_s)
 
-x_pred = scaler.inverse_transform(Psi_pred[:12, :].T).T
+# Inverse transform only the first 10 rows (linear state rows)
+x_pred = scaler.inverse_transform(Psi_pred[:10, :].T).T
 
 # ====================================================
-# Plot simulation response and EDMD predicted trajectory (3D)
+# Plot EDMD predicted trajectory (3D)
 # ====================================================
 x_edmd = x_pred[0, :]
 y_edmd = x_pred[1, :]
 z_edmd = x_pred[2, :]
-
-x_sim = states_test[:, 0]
-y_sim = states_test[:, 1]
-z_sim = states_test[:, 2]
 
 fig = plt.figure()
 ax = fig.add_subplot(111, projection="3d")
@@ -378,17 +376,16 @@ ax.set_zlabel("Z [m]")
 ax.set_title("Simulation response and EDMD prediction (world frame)")
 ax.legend()
 ax.grid(True)
-# plt.show()
-
-
+plt.show()
 
 # ====================================================
-# Plot results
+# One-step vs rollout comparison
 # ====================================================
-labels = ['x','y','z','vx','vy','vz','phi','theta','psi','p','q','r']
-units  = ['m','m','m','m/s','m/s','m/s','deg','deg','deg','rad/s','rad/s','rad/s']
+labels = ['x','y','z','vx','vy','vz','phi','theta','p','q']
+units  = ['m','m','m','m/s','m/s','m/s','rad','rad','rad/s','rad/s']
 
 err = states_test.T - x_pred
+
 print("\n========== ONE-STEP DEBUG ==========")
 X_test_s = scaler.transform(states_test)
 U_test_s = u_scaler.transform(U_test)
@@ -399,7 +396,7 @@ one_step_pred[:, 0] = states_test[0]
 for k in range(states_test.shape[0] - 1):
     psi_k = observables(X_test_s[k])
     psi_next = A @ psi_k + B @ U_test_s[k]
-    x_next_pred = scaler.inverse_transform(psi_next[:12].reshape(1, -1)).flatten()
+    x_next_pred = scaler.inverse_transform(psi_next[:10].reshape(1, -1)).flatten()
     one_step_pred[:, k + 1] = x_next_pred
 
 err_one = states_test.T - one_step_pred
@@ -415,12 +412,12 @@ for lbl, val in zip(labels, rmse_each):
     print(f"{lbl}: {val:.4f}")
 print(f"Total RMSE: {rmse_total:.4f}")
 
-n = err.shape[1]
+n_steps = err.shape[1]
 
 quarters = {
-    "first_25%": slice(0, n//4),
-    "first_50%": slice(0, n//2),
-    "full_100%": slice(0, n),
+    "first_25%": slice(0, n_steps//4),
+    "first_50%": slice(0, n_steps//2),
+    "full_100%": slice(0, n_steps),
 }
 
 print("\n========== SEGMENT RMSE DEBUG ==========")
@@ -432,8 +429,16 @@ for name, sl in quarters.items():
         print(f"  {lbl}: {val:.4f}")
 print("========================================")
 
-fig, axs = plt.subplots(3, 4, figsize=(16, 9))
-for i, ax in enumerate(axs.flatten()):
+# ====================================================
+# Per-state time series plots
+# ====================================================
+n_states = len(labels)
+n_cols = 5
+n_rows = 2
+fig, axs = plt.subplots(n_rows, n_cols, figsize=(20, 7))
+for i in range(n_states):
+    row, col = divmod(i, n_cols)
+    ax = axs[row, col]
     rmse = np.sqrt(np.mean((states_test[:, i] - x_pred[i])**2))
     ax.plot(t_test, states_test[:, i], label='True')
     ax.plot(t_test, x_pred[i], '--', label='EDMDc')
@@ -446,7 +451,9 @@ for i, ax in enumerate(axs.flatten()):
 plt.tight_layout()
 plt.show()
 
-
+# ====================================================
+# Save model
+# ====================================================
 import pickle
 
 model_data = {
@@ -455,10 +462,15 @@ model_data = {
     "scaler": scaler,
     "u_scaler": u_scaler,
     "dt": dt,
-    "source_file": "runs_traj2_plus_hover_n300.pkl",
+    "n_obs": n_obs,
+    "state_labels": labels,
+    "u_labels": ["thrust", "phi_des", "theta_des"],
+    "source_file": "runs_mixed_n300.pkl",
+    "u_type": "attitude_cmd",
 }
 
-with open("edmdc_model_traj2_plus_hover_n300.pkl", "wb") as f:
+with open("edmdc_model.pkl", "wb") as f:
     pickle.dump(model_data, f)
 
-print("Saved model to edmdc_model_traj2_plus_hover_n300.pkl")
+print("\nSaved model to edmdc_model_300.pkl")
+print(f"A: {A.shape}, B: {B.shape}, n_obs: {n_obs}")

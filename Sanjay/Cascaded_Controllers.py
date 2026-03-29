@@ -73,8 +73,10 @@ class QuadPIDController6Fixed:
         u = [u1,u2,u3,u4]
 
         # 4-DOF mixer
-        omega_cmd = pid_mixer.fct_mixer(u, self.quad.kT, self.quad.kD, self.quad.l, min_omega=0.0, max_omega=self.max_speed)
-        return omega_cmd,u
+        omega_cmd = pid_mixer.fct_mixer(u, self.quad.kT, self.quad.kD, self.quad.l, min_omega=0.0,
+                                        max_omega=self.max_speed)
+        u_att = np.array([u1, phi_des, theta_des, psi_des], dtype=float)
+        return omega_cmd, u, u_att
     
 class QuadIPIDController6Fixed:
     def __init__(self, quad, kp_pos, ki_pos, kd_pos, kp_ang, ki_ang, kd_ang, max_speed=400.0, a_xy_max=3.0, a_z_max=5.0, tilt_max_deg=20.0, torque_roll_pitch_max=0.12, yaw_tau_max=0.01, ipid_alpha=0.2):
@@ -144,6 +146,7 @@ class QuadIPIDController6Fixed:
         u = [u1,u2,u3,u4]
 
         # 4-DOF mixer
-        omega_cmd = pid_mixer.fct_mixer(u, self.quad.kT, self.quad.kD, self.quad.l, min_omega=0.0, max_omega=self.max_speed
-        )
-        return omega_cmd,u
+        omega_cmd = pid_mixer.fct_mixer(u, self.quad.kT, self.quad.kD, self.quad.l, min_omega=0.0,
+                                        max_omega=self.max_speed)
+        u_att = np.array([u1, phi_des, theta_des, psi_des], dtype=float)
+        return omega_cmd, u, u_att

@@ -9,104 +9,104 @@ def load_simulation_runs(filename):
 
 
 def infer_family_label(data, filename):
-    # Prefer explicit traj code if available
     traj = data.get("traj", None)
+    if traj == 1:                    return "helix"
+    elif traj == 2:                  return "fig8"
+    elif traj == 3:                  return "lissajous"
+    elif traj == 4:                  return "waypoint"
+    elif traj == "hover_excitation": return "hover_excitation"
+    elif traj == "prbs":             return "prbs"
+    elif isinstance(traj, str):      return traj
 
-    if traj == 1:
-        return "helix"
-    elif traj == 2:
-        return "fig8"
-    elif traj == 3:
-        return "hover_excitation"
-    elif isinstance(traj, str):
-        return traj
-
-    # Fallback: infer from filename
     name = Path(filename).stem.lower()
-    if "traj1" in name or "helix" in name:
-        return "helix"
-    if "traj2" in name or "fig8" in name:
-        return "fig8"
-    if "hover" in name or "excitation" in name:
-        return "hover_excitation"
-
+    if "traj1" in name or "helix"  in name: return "helix"
+    if "traj2" in name or "fig8"   in name: return "fig8"
+    if "traj3" in name or "lissa"  in name: return "lissajous"
+    if "traj4" in name or "wayp"   in name: return "waypoint"
+    if "hover" in name:                      return "hover_excitation"
+    if "prbs"  in name:                      return "prbs"
     return "unknown"
 
 
-def combine_run_files(file1, file2, output_file):
-    data1 = load_simulation_runs(file1)
-    data2 = load_simulation_runs(file2)
+def combine_run_files(file_list, output_file):
+    datasets = [load_simulation_runs(f) for f in file_list]
 
-    required_keys = ["traj", "n", "sim_dt", "time", "t", "states", "U", "ref_traj_list"]
-    for k in required_keys:
-        if k not in data1 or k not in data2:
-            raise KeyError(f"Missing required key '{k}' in one of the files")
+    # Drop degenerate psi_des column if present (col 3, always zero)
+    for d in datasets:
+        if d["U"].shape[2] == 4:
+            d["U"] = d["U"][:, :, :3]
 
-    # Basic compatibility checks
-    if not np.isclose(data1["sim_dt"], data2["sim_dt"]):
-        raise ValueError(f"sim_dt mismatch: {data1['sim_dt']} vs {data2['sim_dt']}")
+    # Drop psi (col 8), p (col 9), q (col 10), r (col 11)
+    # Keep only [x, y, z, vx, vy, vz, phi, theta] — 8 states
+    # Drop psi, p, q, r — keep only [x, y, z, vx, vy, vz, phi, theta]
+    for d in datasets:
+        if d["states"].shape[2] == 12:
+            # drop psi(8) and r(11) only — keep p(9) and q(10)
+            d["states"] = d["states"][:, :, [0, 1, 2, 3, 4, 5, 6, 7, 9, 10]]
 
-    if not np.array_equal(data1["time"], data2["time"]):
-        raise ValueError("time vectors do not match")
+        # Debug — check actual shapes before dropping
+    for f, d in zip(file_list, datasets):
+        print(f"{Path(f).name}: states shape = {d['states'].shape}")
 
-    if data1["states"].shape[1:] != data2["states"].shape[1:]:
-        raise ValueError(
-            f"states shape mismatch: {data1['states'].shape} vs {data2['states'].shape}"
-        )
+    # Compatibility checks against first file
+    ref = datasets[0]
+    for i, data in enumerate(datasets[1:], 1):
+        if not np.isclose(ref["sim_dt"], data["sim_dt"]):
+            raise ValueError(f"sim_dt mismatch at file {i}")
+        if not np.array_equal(ref["time"], data["time"]):
+            raise ValueError(f"time vector mismatch at file {i}")
+        if ref["states"].shape[1:] != data["states"].shape[1:]:
+            raise ValueError(f"states shape mismatch at file {i}")
+        if ref["U"].shape[1:] != data["U"].shape[1:]:
+            raise ValueError(f"U shape mismatch at file {i}")
+        if ref["t"].shape[1:] != data["t"].shape[1:]:
+            raise ValueError(f"t shape mismatch at file {i}")
 
-    if data1["U"].shape[1:] != data2["U"].shape[1:]:
-        raise ValueError(
-            f"input shape mismatch: {data1['U'].shape} vs {data2['U'].shape}"
-        )
+    # Combine
+    t_combined      = np.concatenate([d["t"]      for d in datasets], axis=0)
+    states_combined = np.concatenate([d["states"] for d in datasets], axis=0)
 
-    if data1["t"].shape[1:] != data2["t"].shape[1:]:
-        raise ValueError(
-            f"time-array shape mismatch: {data1['t'].shape} vs {data2['t'].shape}"
-        )
+    U_combined      = np.concatenate([d["U"]      for d in datasets], axis=0)
+    ref_combined    = sum([list(d["ref_traj_list"]) for d in datasets], [])
 
-    # Combine along run axis
-    t_combined = np.concatenate([data1["t"], data2["t"]], axis=0)
-    states_combined = np.concatenate([data1["states"], data2["states"]], axis=0)
-    U_combined = np.concatenate([data1["U"], data2["U"]], axis=0)
-    ref_combined = list(data1["ref_traj_list"]) + list(data2["ref_traj_list"])
-
-    label1 = infer_family_label(data1, file1)
-    label2 = infer_family_label(data2, file2)
-
-    family_labels = (
-        [label1] * data1["n"] +
-        [label2] * data2["n"]
-    )
+    family_labels = sum([
+        [infer_family_label(d, f)] * d["n"]
+        for d, f in zip(datasets, file_list)
+    ], [])
 
     combined_data = {
         "traj": "mixed",
-        "n": data1["n"] + data2["n"],
-        "sim_dt": data1["sim_dt"],
-        "time": data1["time"],
+        "n": sum(d["n"] for d in datasets),
+        "sim_dt": ref["sim_dt"],
+        "time": ref["time"],
         "t": t_combined,
         "states": states_combined,
         "U": U_combined,
         "ref_traj_list": ref_combined,
         "family_labels": family_labels,
-        "source_files": [str(file1), str(file2)],
+        "source_files": [str(f) for f in file_list],
     }
 
     with open(output_file, "wb") as f:
         pickle.dump(combined_data, f)
 
-    print(f"Saved combined file to: {Path(output_file).resolve()}")
-    print(f"Total runs: {combined_data['n']}")
-    print(f"t shape: {combined_data['t'].shape}")
+    print(f"Saved: {Path(output_file).resolve()}")
+    print(f"Total runs:   {combined_data['n']}")
+    print(f"t shape:      {combined_data['t'].shape}")
     print(f"states shape: {combined_data['states'].shape}")
-    print(f"U shape: {combined_data['U'].shape}")
-    print(f"ref_traj_list length: {len(combined_data['ref_traj_list'])}")
-    print(f"family_labels length: {len(combined_data['family_labels'])}")
-    print(f"labels used: {label1}, {label2}")
+    print(f"U shape:      {combined_data['U'].shape}")
+    print(f"Families:     {set(family_labels)}")
 
 
 if __name__ == "__main__":
     combine_run_files(
-        "runs_traj2_n200.pkl",
-        "runs_hover_excitation_n100.pkl",
-        "runs_traj2_plus_hover_n300.pkl"
+        file_list=[
+            "runs_traj1_n50.pkl",
+            "runs_traj2_n50.pkl",
+            "runs_traj3_n50.pkl",
+            "runs_traj4_n50.pkl",
+            "runs_traj5_n30.pkl",
+            "runs_prbs_n70.pkl",
+        ],
+        output_file="runs_mixed_n300.pkl"
     )
