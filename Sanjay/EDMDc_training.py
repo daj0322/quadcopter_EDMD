@@ -17,7 +17,7 @@ from Simulation import quad_sim
 SCRIPT_DIR = Path(__file__).resolve().parent
 DATA_DIR = SCRIPT_DIR
 noise_std = 0.00
-dt = 0.01               # EDMD time step (s)
+dt = 0.1               # EDMD time step (s)
 
 enable_filter = True
 filter_type = 'savgol'
@@ -39,7 +39,12 @@ def load_simulation_runs(filename):
 t_all, states_all, U_all, ref_traj_list = load_simulation_runs("runs_mixed_n300.pkl")
 
 n_runs   = t_all.shape[0]
-test_idx = 99
+test_indices = [39, 59, 99, 129, 155, 210]
+train_indices = [i for i in range(n_runs) if i not in test_indices]
+test_idx = test_indices[0]  # use first one for the training script's own plots
+
+print("Test indices (held out):", test_indices)
+print("Number of training runs:", len(train_indices))
 
 print("Loaded file: runs_mixedu_n350.pkl")
 print("Total runs:", n_runs)
@@ -469,7 +474,7 @@ model_data = {
     "u_type": "attitude_cmd",
 }
 
-with open("edmdc_model.pkl", "wb") as f:
+with open("edmdc_model_0.1.pkl", "wb") as f:
     pickle.dump(model_data, f)
 
 print("\nSaved model to edmdc_model_300.pkl")

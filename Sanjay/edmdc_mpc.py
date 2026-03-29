@@ -21,19 +21,19 @@ TEST_RUN_IDX       = 59
 
 # EDMD-MPC horizon
 N_EDMD  = 50    # prediction steps at dt=0.1s = 5s lookahead
-NC_EDMD = 25    # control horizon
+NC_EDMD = 10    # control horizon
 
 # Q penalizes physical states in SCALED space
 # [x, y, z, vx, vy, vz, phi, theta, p, q]
 Q_DIAG_EDMD = np.array([
-    200000.0, 200000.0, 200000.0,
-       500.0,    500.0,    500.0,
-         0.0,      0.0,
-         0.0,      0.0,
+    750000.0, 750000.0, 750000.0,
+    100.0, 100.0, 100.0,
+    0.0, 0.0,
+    0.0, 0.0,
 ], dtype=float)
 
-R_DIAG_EDMD  = np.array([0.0001, 0.1, 0.1], dtype=float)
-RD_DIAG_EDMD = np.array([1e-05, 0.01, 0.01], dtype=float)
+R_DIAG_EDMD  = np.array([0.001, 0.1, 0.1], dtype=float)
+RD_DIAG_EDMD = np.array([0.0001, 0.01, 0.01], dtype=float)
 
 # Bounds on delta-u in scaled space — [thrust, phi_des, theta_des]
 DU_MIN_EDMD = np.array([-5.0, -3.5, -3.5], dtype=float)
