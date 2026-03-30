@@ -31,7 +31,7 @@ from edmdc_mpc import (
 # CONFIG
 # ============================================================
 SCRIPT_DIR       = Path(__file__).resolve().parent
-EDMDC_MODEL_FILE = "edmdc_model_300.pkl"
+EDMDC_MODEL_FILE = "edmdc_model_300_0.01.pkl"
 DATA_FILE        = "runs_mixed_n300.pkl"
 
 # Test indices — one per trajectory family
@@ -43,7 +43,6 @@ TEST_CASES = [
     (155, "waypoint"),
     (210, "hover excitation"),
 ]
-
 '''
 #for 0.1s
 # MPC config (use tuned values)
@@ -56,7 +55,6 @@ Q_DIAG = np.array([
          0.0,      0.0,
          0.0,      0.0,
 ], dtype=float)
-
 # For 0.1s
 R_DIAG  = np.array([0.001, 0.25, 0.25], dtype=float)
 RD_DIAG = np.array([0.0001, 0.025, 0.025], dtype=float)

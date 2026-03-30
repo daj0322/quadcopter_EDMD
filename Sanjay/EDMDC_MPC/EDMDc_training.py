@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 
 # Configuration
 SCRIPT_DIR = Path(__file__).resolve().parent
-dt = 0.01               # EDMD time step (s)
+dt = 0.1               # EDMD time step (s)
 MPC_HORIZON = 20
 
 # Held-out test indices (must match final_comparison.py)
@@ -493,8 +493,8 @@ model_data = {
     "u_type": "attitude_cmd",
 }
 
-with open("edmdc_model_300_0.01.pkl", "wb") as f:
+with open("edmdc_model_300.pkl", "wb") as f:
     pickle.dump(model_data, f)
 
-print("\nSaved model to edmdc_model_300_0.01.pkl")
+print("\nSaved model to edmdc_model_300.pkl")
 print(f"A: {A.shape}, B: {B.shape}, n_obs: {n_obs}, lambda: {best_lam:.0e}")
