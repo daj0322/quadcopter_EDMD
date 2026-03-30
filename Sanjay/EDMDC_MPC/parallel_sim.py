@@ -142,11 +142,11 @@ if __name__ == "__main__":
     import time
     t0 = time.perf_counter()
 
-    #save_parallel(traj=1, n=50, filename="runs_traj1_n50.pkl")  # helix
-    #save_parallel(traj=2, n=50, filename="runs_traj2_n50.pkl")  # fig8
-    #save_parallel(traj=3, n=50, filename="runs_traj3_n50.pkl")  # lissajous
-    #save_parallel(traj=4, n=50, filename="runs_traj4_n50.pkl")  # waypoint
-    #save_parallel(traj=5, n=30, filename="runs_traj5_n30.pkl")  # hover
+    save_parallel(traj=1, n=50, filename="runs_traj1_n50.pkl")  # helix
+    save_parallel(traj=2, n=50, filename="runs_traj2_n50.pkl")  # fig8
+    save_parallel(traj=3, n=50, filename="runs_traj3_n50.pkl")  # lissajous
+    save_parallel(traj=4, n=50, filename="runs_traj4_n50.pkl")  # waypoint
+    save_parallel(traj=5, n=30, filename="runs_traj5_n30.pkl")  # hover
     save_prbs_parallel(n=70, filename="runs_prbs_n70.pkl")  # PRBS
 
 

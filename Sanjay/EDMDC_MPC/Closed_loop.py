@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.integrate import solve_ivp
+from PID_Mixer import pid_mixer
 
 class ClosedLoopQuad:
     def __init__(self, quad, controller):
@@ -10,11 +11,11 @@ class ClosedLoopQuad:
         state = np.array(init_state, dtype=float)
         states         = np.zeros((len(time), len(state)))
         omegas         = np.zeros((len(time), 4))
-        control_inputs = np.zeros((len(time), 4))  # torques [u1,u2,u3,u4]
-        u_att_log      = np.zeros((len(time), 4))  # attitude cmds [u1,phi_des,theta_des,psi_des]
+        control_inputs = np.zeros((len(time), 4))
+        u_att_log      = np.zeros((len(time), 4))
 
         for i, t in enumerate(time):
-            states[i] = state  # ← record BEFORE integration
+            states[i] = state
             omega_cmd, u, u_att = self.controller.fct_step(state, ref_traj[i], dt)
             control_inputs[i] = u
             u_att_log[i] = u_att
@@ -32,16 +33,12 @@ class ClosedLoopQuad:
 
     def fct_step_attitude(self, state, u1, phi_des, theta_des, dt):
         """
-        Single step using attitude commands directly — bypasses outer PID.
-        Feeds [u1, phi_des, theta_des] straight to inner PID.
-        Returns next_state.
+        Advance the plant by one step using direct attitude commands.
         """
-        from scipy.integrate import solve_ivp
-        from PID_Mixer import pid_mixer
 
         phi, theta = state[6], state[7]
 
-        # Inner PID: attitude error → torques
+        # Inner-loop attitude control.
         u2 = self.controller.pid_phi.fct_control(phi, phi_des, dt)
         u3 = self.controller.pid_theta.fct_control(theta, theta_des, dt)
         u2 = float(np.clip(u2, -self.controller.torque_max, self.controller.torque_max))

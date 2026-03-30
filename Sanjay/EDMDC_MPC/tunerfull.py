@@ -21,7 +21,7 @@ import numpy as np
 # CONFIG
 # ============================================================
 SCRIPT_DIR       = Path(__file__).resolve().parent
-EDMDC_MODEL_FILE = "edmdc_model_0.1.pkl"
+EDMDC_MODEL_FILE = "edmdc_model_300_0.01.pkl"
 DATA_FILE        = "runs_mixed_n300.pkl"
 
 TEST_INDICES = [39, 59, 99, 129, 155, 210]

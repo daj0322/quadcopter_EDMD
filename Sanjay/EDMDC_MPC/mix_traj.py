@@ -14,7 +14,7 @@ def infer_family_label(data, filename):
     elif traj == 2:                  return "fig8"
     elif traj == 3:                  return "lissajous"
     elif traj == 4:                  return "waypoint"
-    elif traj == "hover_excitation": return "hover_excitation"
+    elif traj == 5:                  return "hover_excitation"
     elif traj == "prbs":             return "prbs"
     elif isinstance(traj, str):      return traj
 

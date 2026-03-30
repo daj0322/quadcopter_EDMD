@@ -1,5 +1,4 @@
 import numpy as np
-import random
 from quadcopter import quadcopter
 from Cascaded_Controllers import QuadPIDController6Fixed
 from Closed_loop import ClosedLoopQuad
@@ -230,7 +229,6 @@ class quad_sim:
         yaw_amp_deg=5.0,
         n_sines_range=(2, 4),
     ):
-        import numpy as np
 
         time = np.asarray(time, dtype=float)
         T = len(time)
@@ -284,8 +282,6 @@ class quad_sim:
         return traj
 
     def fct_run_hover_excitation_simulation(self, n):
-        import random
-        import numpy as np
 
         t_runs = []
         states_runs = []
@@ -337,7 +333,7 @@ class quad_sim:
         t, states, U, ref_traj_list = self.fct_run_hover_excitation_simulation(n)
 
         data = {
-            "traj": 3,
+            "traj": "hover_excitation",
             "n": n,
             "sim_dt": self.dt,
             "time": self.time,
@@ -433,34 +429,11 @@ class quad_sim:
 
     def fct_run_simulation(self, traj, n):
         """
-        Run n simulations using a single trajectory type.
+        Run n simulations for a selected trajectory family.
 
-        All runs start at:
-            position = (0,0,0)
-            velocity = (0,0,0)
-            angles = 0
-
-        traj = 1  -> helical trajectory
-        traj = 2  -> figure-8 trajectory
-
-        Each run gets different randomized trajectory parameters,
-        but they are deterministic by run index. That means:
-
-        - calling this function multiple times with the same traj and n
-        will generate the exact same trajectories
-        - run 0 always uses the same trajectory parameters
-        - run 1 always uses the same trajectory parameters
-        - etc.
-
-        Returns
-        -------
-        t : (n, T)
-        states : (n, T, 12)
-        U : (n, T, n_inputs)
-        ref_traj_list : list of reference trajectories used for each run
+        Each run uses deterministic randomized trajectory parameters based on
+        the run index so the generated dataset is reproducible.
         """
-
-        import random
 
         t_runs = []
         states_runs = []
@@ -517,110 +490,6 @@ class quad_sim:
 
         return t, states, U, ref_traj_list
 
-    # def fct_run_simulation(self, traj, n):
-    #     """
-    #     Run n simulations cycling through available trajectory types.
-
-    #     Deterministic randomization per run:
-    #     - Same (traj, n) → same trajectories every time
-    #     - Different runs → different parameters
-
-    #     All runs start from:
-    #         state = 0
-    #         trajectory start = (0,0,0)
-    #     """
-
-    #     import random
-
-    #     # ---------------------------------------------------------
-    #     # Available trajectory types
-    #     # ---------------------------------------------------------
-    #     traj_ids = [1, 2]
-    #     num_traj_types = len(traj_ids)
-
-    #     start_index = (traj - 1) % num_traj_types
-
-    #     t_runs = []
-    #     states_runs = []
-    #     U_runs = []
-    #     ref_traj_list = []
-
-    #     for i in range(n):
-
-    #         # -----------------------------------------------------
-    #         # Select trajectory type (cycling)
-    #         # -----------------------------------------------------
-    #         traj_id = traj_ids[(start_index + i) % num_traj_types]
-
-    #         # -----------------------------------------------------
-    #         # Deterministic RNG (KEY PART)
-    #         # -----------------------------------------------------
-    #         seed = 1000 * traj_id + i
-    #         rng = random.Random(seed)
-
-    #         # =====================================================
-    #         # 1) Build trajectory (deterministic per run)
-    #         # =====================================================
-    #         if traj_id == 1:
-
-    #             ref_traj = self.fct_make_helical_trajectory(
-    #                 self.time,
-    #                 center=(0.0, 0.0),
-    #                 radius=rng.uniform(1, 5),
-    #                 z_start=0.0,
-    #                 z_end=rng.uniform(5, 10),
-    #                 n_turns=1,
-    #                 yaw_follows_path=True
-    #             )
-
-    #         elif traj_id == 2:
-
-    #             ref_traj = self.fct_make_figure8_trajectory(
-    #                 self.time,
-    #                 center=(0.0, 0.0, 0.0),
-    #                 a=rng.uniform(1, 5),
-    #                 b=rng.uniform(1, 5),
-    #                 n_loops=1,
-    #                 tilt_deg=rng.uniform(10, 80),
-    #                 yaw_follows_path=True
-    #             )
-
-    #         else:
-    #             raise ValueError(f"Unknown trajectory id: {traj_id}")
-
-    #         # =====================================================
-    #         # 2) Shift trajectory to start at origin
-    #         # =====================================================
-    #         p0 = ref_traj[0]["pos"].copy()
-    #         for k in range(len(ref_traj)):
-    #             ref_traj[k]["pos"] -= p0
-
-    #         ref_traj_list.append(ref_traj)
-
-    #         # =====================================================
-    #         # 3) Initial state = ZERO
-    #         # =====================================================
-    #         init_state = np.zeros(12)
-
-    #         # =====================================================
-    #         # 4) Run simulation
-    #         # =====================================================
-    #         t_i, states_i, omegas_i, U_i = self.sim_PID.fct_simulate(
-    #             self.time, self.dt, ref_traj, init_state
-    #         )
-
-    #         t_runs.append(t_i)
-    #         states_runs.append(states_i)
-    #         U_runs.append(U_i)
-
-    #     # =====================================================
-    #     # 5) Stack results
-    #     # =====================================================
-    #     t = np.stack(t_runs, axis=0)
-    #     states = np.stack(states_runs, axis=0)
-    #     U = np.stack(U_runs, axis=0)
-
-    #     return t, states, U, ref_traj_list
 
     def fct_sample_trajectory(self, traj, rng):
         if traj == 1:

@@ -1,15 +1,13 @@
-# %% Import Libraries
 import numpy as np
 
-# %% Quadcopter Dynamics
 class quadcopter:
     def __init__(self, m, g, l, I, kD, kT, k_drag_linear, k_drag_angular, prop_efficiency=None):
         self.m = m
         self.g = g
         self.l = l
         self.I = I
-        self.kD = kD  # drag torque constant
-        self.kT = kT  # thrust coefficient
+        self.kD = kD
+        self.kT = kT
         self.k_drag_linear = k_drag_linear
         self.k_drag_angular = k_drag_angular
         if prop_efficiency is None:
@@ -37,9 +35,8 @@ class quadcopter:
         ])
     
     def fct_wind_force(self, t):
-        # Constant bias + smooth gust
         F_bias = 0.8
-        F_gust = 0.5 * np.sin(0.6*t) # smooth sinusoidal gust
+        F_gust = 0.5 * np.sin(0.6*t)
         return np.array([F_bias + F_gust, 0.0, 0.0])
 
     def fct_rotor_forces(self, omega):
@@ -51,7 +48,7 @@ class quadcopter:
         return T, tau
 
     def fct_Rotor_torque(self, T, tau):
-        # X-configuration
+        # X-configuration arm projection.
         arm = self.l / np.sqrt(2)
         u1 = np.sum(T)
         u2 = arm * (-T[0] - T[1] + T[2] + T[3]) # Roll
@@ -69,13 +66,12 @@ class quadcopter:
         m, g, I = self.m, self.g, self.I
         x, y, z, vx, vy, vz, phi, theta, psi, p, q, r = state
         vel = np.array([vx, vy, vz])
-        ang = np.array([phi, theta, psi])
         omega_body = np.array([p, q, r])
 
         R = self.fct_R_matrix(phi, theta, psi)
         gravity = np.array([0, 0, -g])
         drag_world = -self.k_drag_linear * vel
-        F_wind = 0 #self.fct_wind_force(t)
+        F_wind = 0.0
         acc = (1/m) * (R @ thrust + drag_world + F_wind) + gravity
 
         damping = -self.k_drag_angular * omega_body

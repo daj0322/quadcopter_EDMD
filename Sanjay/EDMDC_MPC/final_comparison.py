@@ -1,23 +1,17 @@
 """
-compare_mpc.py
-==============
-Head-to-head comparison:
-  1) PID baseline (from saved data)
-  2) Linear MPC (Jacobian linearization around hover)
-  3) EDMDc MPC (data-driven lifted model)
+Compare trajectory tracking performance of three outer-loop controllers:
+PID, linear MPC, and EDMDc MPC.
 
-All three use the same plant for execution (inner PID + drone via fct_step_attitude).
-Both MPCs use the same OSQP QP solver, same horizon, same Q/R weights.
-The only difference is the prediction model.
+All controllers command the same plant through the attitude-level input
+[u1, phi_des, theta_des] and are evaluated against the same reference
+trajectories.
 """
 
-import pickle
 import time
 from pathlib import Path
 
 import numpy as np
 import scipy.linalg as la
-import scipy.sparse as sp
 import matplotlib.pyplot as plt
 
 from Simulation import quad_sim
@@ -25,7 +19,6 @@ from edmdc_mpc import (
     EDMDcMPC_QP,
     load_edmdc_model,
     load_simulation_runs,
-    observables,
     lifted_state_from_x,
     drop_to_10state,
     precompute_ref_std,
@@ -38,99 +31,100 @@ from edmdc_mpc import (
 # CONFIG
 # ============================================================
 SCRIPT_DIR       = Path(__file__).resolve().parent
-EDMDC_MODEL_FILE = "edmdc_model_0.1.pkl"
+EDMDC_MODEL_FILE = "edmdc_model_300_0.01.pkl"
 DATA_FILE        = "runs_mixed_n300.pkl"
 
 # Test indices — one per trajectory family
 TEST_CASES = [
     (39,  "helix (small)"),
-    (59,  "figure-8"),
-    (99,  "helix (large)"),
+    (59,  "figure-8_1"),
+    (59,  "figure-8_2"),
     (129, "lissajous"),
     (155, "waypoint"),
     (210, "hover excitation"),
 ]
 
+'''
+#for 0.1s
 # MPC config (use tuned values)
-N_MPC   = 20
-NC_MPC  = 15
+N_MPC   = 30
+NC_MPC  = 25 
 
 Q_DIAG = np.array([
-    100000.0, 100000.0, 100000.0,
-    25.0, 25.0, 25.0,
-    0.0, 0.0,
-    0.0, 0.0,
+    125000.0, 125000.0, 125000.0,
+        50.0,     50.0,     50.0,
+         0.0,      0.0,
+         0.0,      0.0,
 ], dtype=float)
 
-R_DIAG = np.array([0.0002, 0.5, 0.5], dtype=float)
-RD_DIAG = np.array([2e-05, 0.05, 0.05], dtype=float)
+# For 0.1s
+R_DIAG  = np.array([0.001, 0.25, 0.25], dtype=float)
+RD_DIAG = np.array([0.0001, 0.025, 0.025], dtype=float)
+'''
+# for 0.01s
+# MPC config (use tuned values)
+N_MPC   = 50   # 30 for 0.1s, 50 for 0.01s
+NC_MPC  = 10   # 25 for 0.1s, 10 for 0.01s
+
+Q_DIAG = np.array([
+    250000.0, 250000.0, 250000.0,
+        50.0,     50.0,     50.0,
+         0.0,      0.0,
+         0.0,      0.0,
+], dtype=float)
+
+R_DIAG  = np.array([0.01, 0.05, 0.05], dtype=float)
+RD_DIAG = np.array([0.001, 0.005, 0.005], dtype=float)
 
 DU_MIN = np.array([-5.0, -3.5, -3.5], dtype=float)
 DU_MAX = np.array([ 5.0,  3.5,  3.5], dtype=float)
 
 
-# ============================================================
-# BUILD LINEAR MODEL (Jacobian around hover)
-# ============================================================
+# Linear hover model
 def build_linear_hover_model(sim, dt):
     """
-    Build discretized linear model of the plant (inner PID + drone)
-    linearized around hover.
+    Build a discrete-time linear hover model for the attitude-commanded plant.
 
-    State: [x, y, z, vx, vy, vz, phi, theta, p, q]  (10)
-    Input: [thrust, phi_des, theta_des]               (3)
-
-    Continuous dynamics at hover:
-        x_dot   = vx
-        y_dot   = vy
-        z_dot   = vz
-        vx_dot  = g * theta          (small angle, thrust along z)
-        vy_dot  = -g * phi           (small angle)
-        vz_dot  = thrust/m - g       (perturbation: 1/m * delta_thrust)
-        phi_dot = p
-        theta_dot = q
-        p_dot   = (-Kp_phi * phi - Kd_phi * p + Kp_phi * phi_des) / Ixx
-        q_dot   = (-Kp_theta * theta - Kd_theta * q + Kp_theta * theta_des) / Iyy
+    The model uses the reduced 10-state representation
+    [x, y, z, vx, vy, vz, phi, theta, p, q] with control input
+    [thrust, phi_des, theta_des]. The inner attitude loop is approximated
+    as PD control about hover, and the continuous model is discretized
+    with a matrix exponential.
     """
-    m   = sim.q_mass
-    g   = sim.g
+    m = sim.q_mass
+    g = sim.g
     Ixx = sim.Ixx
     Iyy = sim.Iyy
 
-    # Inner PID gains (PD approximation — ignore integral for linearization)
-    Kp_phi   = sim.kp_ang[0]
-    Kd_phi   = sim.kd_ang[0]
+    # Inner-loop PD gains used for hover linearization.
+    Kp_phi = sim.kp_ang[0]
+    Kd_phi = sim.kd_ang[0]
     Kp_theta = sim.kp_ang[1]
     Kd_theta = sim.kd_ang[1]
 
     nx, nu = 10, 3
 
-    # Continuous A matrix
+    # Continuous-time state matrix.
     Ac = np.zeros((nx, nx))
-    # Position from velocity
-    Ac[0, 3] = 1.0   # dx/dt = vx
-    Ac[1, 4] = 1.0   # dy/dt = vy
-    Ac[2, 5] = 1.0   # dz/dt = vz
-    # Velocity from angles (small angle gravity projection)
-    Ac[3, 7] = g     # dvx/dt = g * theta
-    Ac[4, 6] = -g    # dvy/dt = -g * phi
-    # vz: no state dependence at hover (thrust perturbation is in B)
-    # Angle from angular rate
-    Ac[6, 8] = 1.0   # dphi/dt = p
-    Ac[7, 9] = 1.0   # dtheta/dt = q
-    # Angular rate from inner PID
-    Ac[8, 6] = -Kp_phi / Ixx     # dp/dt depends on phi
-    Ac[8, 8] = -Kd_phi / Ixx     # dp/dt depends on p (damping)
-    Ac[9, 7] = -Kp_theta / Iyy   # dq/dt depends on theta
-    Ac[9, 9] = -Kd_theta / Iyy   # dq/dt depends on q (damping)
+    Ac[0, 3] = 1.0
+    Ac[1, 4] = 1.0
+    Ac[2, 5] = 1.0
+    Ac[3, 7] = g
+    Ac[4, 6] = -g
+    Ac[6, 8] = 1.0
+    Ac[7, 9] = 1.0
+    Ac[8, 6] = -Kp_phi / Ixx
+    Ac[8, 8] = -Kd_phi / Ixx
+    Ac[9, 7] = -Kp_theta / Iyy
+    Ac[9, 9] = -Kd_theta / Iyy
 
-    # Continuous B matrix
+    # Continuous-time input matrix.
     Bc = np.zeros((nx, nu))
-    Bc[5, 0] = 1.0 / m           # dvz/dt = delta_thrust / m
-    Bc[8, 1] = Kp_phi / Ixx      # dp/dt from phi_des
-    Bc[9, 2] = Kp_theta / Iyy    # dq/dt from theta_des
+    Bc[5, 0] = 1.0 / m
+    Bc[8, 1] = Kp_phi / Ixx
+    Bc[9, 2] = Kp_theta / Iyy
 
-    # Discretize via matrix exponential: [Ad, Bd] from [Ac, Bc; 0, 0]
+    # Discretize with a matrix exponential.
     M = np.zeros((nx + nu, nx + nu))
     M[:nx, :nx] = Ac * dt
     M[:nx, nx:] = Bc * dt
@@ -148,21 +142,17 @@ def build_linear_hover_model(sim, dt):
     return Ad, Bd
 
 
-# ============================================================
-# RUN MPC CLOSED-LOOP
-# ============================================================
-def run_mpc_closedloop(mpc, sim, X_true, ref_traj, ref_xyz, scaler,
-                       dt, N, n_steps, label="MPC"):
-    """
-    Generic closed-loop runner for any MPC that has .compute(z, ref_horizon).
-    """
+# Closed-loop rollout
+def run_mpc_closedloop(mpc, sim, X_init, ref_traj, scaler, dt, horizon, n_steps):
+    """Run closed-loop tracking with the EDMDc-based MPC controller."""
     ref_std = precompute_ref_std(ref_traj[:n_steps], scaler, n_states=10)
 
     X_mpc = np.zeros((n_steps, 10))
     U_mpc = np.zeros((n_steps, 3))
 
+    # Initialize the plant state from the first logged 10-state sample.
     x_current_12 = np.zeros(12)
-    x10_init = X_true[0]
+    x10_init = X_init[0]
     x_current_12[0:6]  = x10_init[0:6]
     x_current_12[6:8]  = x10_init[6:8]
     x_current_12[9:11] = x10_init[8:10]
@@ -173,47 +163,40 @@ def run_mpc_closedloop(mpc, sim, X_true, ref_traj, ref_xyz, scaler,
     for k in range(n_steps - 1):
         x10 = drop_to_10state(x_current_12)
         z_k = lifted_state_from_x(x10, scaler)
-        x_ref_h = build_ref_horizon(ref_std, k, N)
+        x_ref_h = build_ref_horizon(ref_std, k, horizon)
 
         t0 = time.perf_counter()
         u_cmd = mpc.compute(z_k, x_ref_h)
         solve_times.append(time.perf_counter() - t0)
 
-        u_cmd[0] = np.clip(u_cmd[0], 0.5 * sim.q_mass * sim.g,
-                                      2.0 * sim.q_mass * sim.g)
-        u_cmd[1] = np.clip(u_cmd[1], -sim.controller_PID.tilt_max,
-                                       sim.controller_PID.tilt_max)
-        u_cmd[2] = np.clip(u_cmd[2], -sim.controller_PID.tilt_max,
-                                       sim.controller_PID.tilt_max)
+        u_cmd[0] = np.clip(u_cmd[0], 0.5 * sim.q_mass * sim.g, 2.0 * sim.q_mass * sim.g)
+        u_cmd[1] = np.clip(u_cmd[1], -sim.controller_PID.tilt_max, sim.controller_PID.tilt_max)
+        u_cmd[2] = np.clip(u_cmd[2], -sim.controller_PID.tilt_max, sim.controller_PID.tilt_max)
 
         U_mpc[k] = u_cmd
 
         x_next_12 = sim.sim_PID.fct_step_attitude(
             x_current_12,
-            u1=u_cmd[0], phi_des=u_cmd[1], theta_des=u_cmd[2],
+            u1=u_cmd[0],
+            phi_des=u_cmd[1],
+            theta_des=u_cmd[2],
             dt=dt
         )
         x_current_12 = x_next_12
         X_mpc[k + 1] = drop_to_10state(x_next_12)
 
     U_mpc[-1] = U_mpc[-2]
-
     return X_mpc, U_mpc, solve_times
 
-
-def run_linear_mpc_closedloop(mpc, sim, X_true, ref_traj, ref_xyz, scaler,
-                              u_scaler_lin, dt, N, n_steps):
-    """
-    Closed-loop runner for linear MPC.
-    The linear MPC operates in its own scaled space but uses the same plant.
-    """
+def run_linear_mpc_closedloop(mpc, sim, X_init, ref_traj, scaler, dt, horizon, n_steps):
+    """Run closed-loop tracking with the linear MPC controller."""
     ref_std = precompute_ref_std(ref_traj[:n_steps], scaler, n_states=10)
 
     X_mpc = np.zeros((n_steps, 10))
     U_mpc = np.zeros((n_steps, 3))
 
     x_current_12 = np.zeros(12)
-    x10_init = X_true[0]
+    x10_init = X_init[0]
     x_current_12[0:6]  = x10_init[0:6]
     x_current_12[6:8]  = x10_init[6:8]
     x_current_12[9:11] = x10_init[8:10]
@@ -224,10 +207,10 @@ def run_linear_mpc_closedloop(mpc, sim, X_true, ref_traj, ref_xyz, scaler,
     for k in range(n_steps - 1):
         x10 = drop_to_10state(x_current_12)
 
-        # Linear MPC: lift = just scale (no nonlinear observables)
+        # Linear MPC uses the standardized physical state directly.
         z_k = scaler.transform(x10.reshape(1, -1)).flatten()
 
-        x_ref_h = build_ref_horizon(ref_std, k, N)
+        x_ref_h = build_ref_horizon(ref_std, k, horizon)
 
         t0 = time.perf_counter()
         u_cmd = mpc.compute(z_k, x_ref_h)
@@ -255,21 +238,14 @@ def run_linear_mpc_closedloop(mpc, sim, X_true, ref_traj, ref_xyz, scaler,
     return X_mpc, U_mpc, solve_times
 
 
-# ============================================================
-# SCALE LINEAR MODEL TO MATCH EDMDC SCALER SPACE
-# ============================================================
+# Model scaling
 def scale_linear_model(Ad, Bd, state_scaler, u_scaler):
     """
-    Transform linear model from physical space to standardized space
-    so it can be used with the same Q/R weights as EDMDc MPC.
+    Map the linear model from physical coordinates to standardized coordinates.
 
-    If x_s = (x - mu_x) / sigma_x, u_s = (u - mu_u) / sigma_u
-    Then: x_s_{k+1} = A_s @ x_s_k + B_s @ u_s_k + c_s
+    If x_s = (x - mu_x) / sigma_x and u_s = (u - mu_u) / sigma_u, then
 
-    A_s = diag(1/sigma_x) @ Ad @ diag(sigma_x)
-    B_s = diag(1/sigma_x) @ Bd @ diag(sigma_u)
-    c_s = diag(1/sigma_x) @ (Ad @ mu_x + Bd @ mu_u - mu_x)
-        (affine offset — absorbed into bias or ignored)
+        x_s(k+1) = A_s x_s(k) + B_s u_s(k) + c_s
     """
     sx = state_scaler.scale_
     mx = state_scaler.mean_
@@ -277,17 +253,16 @@ def scale_linear_model(Ad, Bd, state_scaler, u_scaler):
     mu = u_scaler.mean_
 
     Sx_inv = np.diag(1.0 / sx)
-    Sx     = np.diag(sx)
-    Su     = np.diag(su)
+    Sx = np.diag(sx)
+    Su = np.diag(su)
 
     A_s = Sx_inv @ Ad @ Sx
     B_s = Sx_inv @ Bd @ Su
-
-    # Affine offset from linearization around hover (not zero in scaled space)
     c_s = Sx_inv @ (Ad @ mx + Bd @ mu - mx)
 
     return A_s, B_s, c_s
 
+# PID baseline at the controller update rate
 def run_pid_at_dt(sim, ref_traj, X_true, dt_mpc, n_steps):
     """
     Re-simulate the PID controller at dt_mpc (e.g. 0.1s) instead of
@@ -331,9 +306,7 @@ def run_pid_at_dt(sim, ref_traj, X_true, dt_mpc, n_steps):
 
 
 
-# ============================================================
-# MAIN
-# ============================================================
+# Main experiment
 def main():
     # --- Load EDMDc model ---
     model    = load_edmdc_model(SCRIPT_DIR / EDMDC_MODEL_FILE)
@@ -437,23 +410,21 @@ def main():
 
         # EDMDc MPC
         X_edmd, U_edmd, st_edmd = run_mpc_closedloop(
-            mpc_edmd, sim, X_true, ref_traj, ref_xyz, scaler,
-            dt, N_MPC, T, label="EDMDc"
+            mpc_edmd, sim, X_true, ref_traj, scaler, dt, N_MPC, T
         )
         edmd_rmse = rmse(X_edmd[:, 0:3], ref_xyz)
         edmd_time = 1e3 * np.mean(st_edmd)
 
         # Linear MPC
         X_lin, U_lin, st_lin = run_linear_mpc_closedloop(
-            mpc_linear, sim, X_true, ref_traj, ref_xyz, scaler,
-            u_scaler, dt, N_MPC, T
+            mpc_linear, sim, X_true, ref_traj, scaler, dt, N_MPC, T
         )
         lin_rmse = rmse(X_lin[:, 0:3], ref_xyz)
         lin_time = 1e3 * np.mean(st_lin)
 
         # Winner
         best = min(pid_slow_rmse, edmd_rmse, lin_rmse)
-        winner = "PID" if best == pid_rmse else ("EDMDc" if best == edmd_rmse else "Linear")
+        winner = "PID" if best == pid_slow_rmse else ("EDMDc" if best == edmd_rmse else "Linear")
 
         print(f"  PID:    {pid_rmse:.4f} m")
         print(f"  EDMDc:  {edmd_rmse:.4f} m  ({edmd_time:.2f} ms/step)")
@@ -558,7 +529,7 @@ def main():
         ax.plot(ref[::ds, 0], ref[::ds, 1], ref[::ds, 2],
                 C_REF, lw=3, label="Reference", zorder=1)
         # Responses on top
-        ax.plot(r["X_true"][::ds, 0], r["X_pid"][::ds, 1], r["X_true"][::ds, 2],
+        ax.plot(r["X_pid"][::ds, 0], r["X_pid"][::ds, 1], r["X_pid"][::ds, 2],
                 color=C_PID, lw=1.2, alpha=0.6, label=f"PID ({r['pid']:.3f}m)", zorder=2)
         ax.plot(r["X_edmd"][::ds, 0], r["X_edmd"][::ds, 1], r["X_edmd"][::ds, 2],
                 color=C_EDMDC, lw=1.5, label=f"EDMDc ({r['edmdc']:.3f}m)", zorder=3)
