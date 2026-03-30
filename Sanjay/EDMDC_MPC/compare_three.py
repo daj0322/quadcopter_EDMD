@@ -9,8 +9,6 @@ trajectories.
 
 import time
 from pathlib import Path
-from NMPC import build_nmpc
-
 
 import numpy as np
 import scipy.linalg as la
@@ -36,10 +34,6 @@ SCRIPT_DIR       = Path(__file__).resolve().parent
 EDMDC_MODEL_FILE = "edmdc_model_300.pkl"
 DATA_FILE        = "runs_mixed_n300.pkl"
 
-TEST_CASES = [
-    (59,  "figure-8"),
-]
-'''
 # Test indices — one per trajectory family
 TEST_CASES = [
     (39,  "helix (small)"),
@@ -49,12 +43,12 @@ TEST_CASES = [
     (155, "waypoint"),
     (210, "hover excitation"),
 ]
-'''
 
+'''
 #for 0.1s
 # MPC config (use tuned values)
-N_MPC   = 20
-NC_MPC  = 10
+N_MPC   = 30
+NC_MPC  = 25 
 
 Q_DIAG = np.array([
     125000.0, 125000.0, 125000.0,
@@ -69,8 +63,8 @@ RD_DIAG = np.array([0.0001, 0.025, 0.025], dtype=float)
 '''
 # for 0.01s
 # MPC config (use tuned values)
-N_MPC   = 10   # 30 for 0.1s, 50 for 0.01s
-NC_MPC  = 5   # 25 for 0.1s, 10 for 0.01s
+N_MPC   = 50   # 30 for 0.1s, 50 for 0.01s
+NC_MPC  = 10   # 25 for 0.1s, 10 for 0.01s
 
 Q_DIAG = np.array([
     250000.0, 250000.0, 250000.0,
@@ -81,7 +75,6 @@ Q_DIAG = np.array([
 
 R_DIAG  = np.array([0.01, 0.05, 0.05], dtype=float)
 RD_DIAG = np.array([0.001, 0.005, 0.005], dtype=float)
-'''
 
 DU_MIN = np.array([-5.0, -3.5, -3.5], dtype=float)
 DU_MAX = np.array([ 5.0,  3.5,  3.5], dtype=float)
@@ -311,54 +304,6 @@ def run_pid_at_dt(sim, ref_traj, X_true, dt_mpc, n_steps):
     return X_pid
 
 
-def run_nmpc_closedloop(nmpc, sim, X_init, ref_traj, ref_xyz, dt, n_steps):
-    X_mpc = np.zeros((n_steps, 10))
-    U_mpc = np.zeros((n_steps, 3))
-
-    x_current_12 = np.zeros(12)
-    x10_init = X_init[0]
-    x_current_12[0:6]  = x10_init[0:6]
-    x_current_12[6:8]  = x10_init[6:8]
-    x_current_12[9:11] = x10_init[8:10]
-    X_mpc[0] = drop_to_10state(x_current_12)
-
-    solve_times = []
-    ref_phys = np.zeros((n_steps, 10))
-    for k in range(n_steps):
-        ref_phys[k, 0:3] = ref_traj[k]["pos"][:3]
-        ref_phys[k, 3:6] = ref_traj[k]["vel"][:3]
-
-    print(f"NMPC rollout starting: n_steps={n_steps}, horizon={nmpc.N}, dt={dt}")
-
-    for k in range(n_steps - 1):
-        if k % 10 == 0:
-            print(f"  NMPC step {k}/{n_steps-1}")
-
-        x10 = drop_to_10state(x_current_12)
-        ref_h = ref_phys[k:k+nmpc.N]
-        if len(ref_h) < nmpc.N:
-            pad = np.tile(ref_h[-1:], (nmpc.N - len(ref_h), 1))
-            ref_h = np.vstack([ref_h, pad])
-
-        t0 = time.perf_counter()
-        u_cmd = nmpc.compute(x10, ref_h)
-        dt_solve = time.perf_counter() - t0
-        solve_times.append(dt_solve)
-
-        if k % 10 == 0:
-            print(f"    solve time = {1e3*dt_solve:.2f} ms, u = {u_cmd}")
-
-        U_mpc[k] = u_cmd
-        x_next_12 = sim.sim_PID.fct_step_attitude(
-            x_current_12, u1=u_cmd[0], phi_des=u_cmd[1],
-            theta_des=u_cmd[2], dt=dt
-        )
-        x_current_12 = x_next_12
-        X_mpc[k+1] = drop_to_10state(x_next_12)
-
-    U_mpc[-1] = U_mpc[-2]
-    print("NMPC rollout finished.")
-    return X_mpc, U_mpc, solve_times
 
 
 # Main experiment
@@ -432,8 +377,6 @@ def main():
         u_nominal_raw=u_nominal,
     )
 
-    nmpc = build_nmpc(sim, dt, N=N_MPC, NC=NC_MPC)
-
     # ============================================================
     # RUN COMPARISON ON ALL TEST CASES
     # ============================================================
@@ -451,7 +394,6 @@ def main():
         ref_traj = ref_traj_list[ri]
         ref_xyz = extract_ref_xyz(ref_traj)
         T = min(len(t_ref), X_true.shape[0], ref_xyz.shape[0])
-        T = min(T,100)
         t_ref   = t_ref[:T]
         X_true  = X_true[:T]
         ref_xyz = ref_xyz[:T]
@@ -480,22 +422,13 @@ def main():
         lin_rmse = rmse(X_lin[:, 0:3], ref_xyz)
         lin_time = 1e3 * np.mean(st_lin)
 
-        # Nonlinear MPC
-        X_nmpc, U_nmpc, st_nmpc = run_nmpc_closedloop(
-            nmpc, sim, X_true, ref_traj, ref_xyz, dt, T
-        )
-        nmpc_rmse = rmse(X_nmpc[:, 0:3], ref_xyz)
-        nmpc_time = 1e3 * np.mean(st_nmpc)
-
         # Winner
-        best = min(pid_slow_rmse, edmd_rmse, lin_rmse, nmpc_rmse)
-        names_map = [(pid_slow_rmse, "PID"), (edmd_rmse, "EDMDc"), (lin_rmse, "Linear"), (nmpc_rmse, "NMPC")]
-        winner = min(names_map, key=lambda x: x[0])[1]
+        best = min(pid_slow_rmse, edmd_rmse, lin_rmse)
+        winner = "PID" if best == pid_slow_rmse else ("EDMDc" if best == edmd_rmse else "Linear")
 
-        print(f"  PID:    {pid_slow_rmse:.4f} m")
+        print(f"  PID:    {pid_rmse:.4f} m")
         print(f"  EDMDc:  {edmd_rmse:.4f} m  ({edmd_time:.2f} ms/step)")
         print(f"  Linear: {lin_rmse:.4f} m  ({lin_time:.2f} ms/step)")
-        print(f"  NMPC:   {nmpc_rmse:.4f} m  ({nmpc_time:.2f} ms/step)")
         print(f"  Winner: {winner}")
 
         all_results.append({
@@ -515,11 +448,6 @@ def main():
             "X_lin": X_lin,
             "U_edmd": U_edmd,
             "U_lin": U_lin,
-            "nmpc": nmpc_rmse,
-            "nmpc_time": nmpc_time,
-            "X_nmpc": X_nmpc,
-            "U_nmpc": U_nmpc,
-
         })
 
     # ============================================================
@@ -542,17 +470,14 @@ def main():
               f"{ratio_e:10.2f}x  {ratio_l:10.2f}x  {winner:>8s}")
 
     # Averages
-    avg_pid = np.mean([r["pid"] for r in all_results])
-    avg_edmdc = np.mean([r["edmdc"] for r in all_results])
-    avg_lin = np.mean([r["linear"] for r in all_results])
-    avg_nmpc = np.mean([r["nmpc"] for r in all_results])
+    avg_pid   = np.mean([r["pid"]    for r in all_results])
+    avg_edmdc = np.mean([r["edmdc"]  for r in all_results])
+    avg_lin   = np.mean([r["linear"] for r in all_results])
+    avg_et    = np.mean([r["edmdc_time"] for r in all_results])
+    avg_lt    = np.mean([r["linear_time"] for r in all_results])
 
-    avg_et = np.mean([r["edmdc_time"] for r in all_results])
-    avg_lt = np.mean([r["linear_time"] for r in all_results])
-    avg_nt = np.mean([r["nmpc_time"] for r in all_results])
-
-    print(f"\n{'Average':<18s}  {avg_pid:8.4f}  {avg_edmdc:8.4f}  {avg_lin:8.4f}  {avg_nmpc:8.4f}")
-    print(f"\nSolve time — EDMDc: {avg_et:.2f} ms  Linear: {avg_lt:.2f} ms  NMPC: {avg_nt:.2f} ms")
+    print(f"\n{'Average':<18s}  {avg_pid:8.4f}  {avg_edmdc:8.4f}  {avg_lin:8.4f}")
+    print(f"\nSolve time — EDMDc: {avg_et:.2f} ms  Linear: {avg_lt:.2f} ms")
 
     # ============================================================
     # PLOTS
@@ -568,23 +493,20 @@ def main():
     C_PID   = "#888888"
     C_EDMDC = "#2ca02c"
     C_LIN   = "#1f77b4"
-    C_NMPC = "#ff7f0e"
 
     # ---------------------------------------------------------------
     # PLOT 1: Bar chart comparison
     # ---------------------------------------------------------------
     fig, ax = plt.subplots(figsize=(12, 5))
     x_pos = np.arange(n_cases)
-    width = 0.2
+    width = 0.25
 
-    ax.bar(x_pos - 1.5 * width, [r["pid"] for r in all_results], width,
+    ax.bar(x_pos - width, [r["pid"]    for r in all_results], width,
            label="PID", color=C_PID, edgecolor="white")
-    ax.bar(x_pos - 0.5 * width, [r["edmdc"] for r in all_results], width,
+    ax.bar(x_pos,         [r["edmdc"]  for r in all_results], width,
            label="EDMDc MPC", color=C_EDMDC, edgecolor="white")
-    ax.bar(x_pos + 0.5 * width, [r["linear"] for r in all_results], width,
+    ax.bar(x_pos + width, [r["linear"] for r in all_results], width,
            label="Linear MPC", color=C_LIN, edgecolor="white")
-    ax.bar(x_pos + 1.5 * width, [r["nmpc"] for r in all_results], width,
-           label="NMPC", color=C_NMPC, edgecolor="white")
 
     ax.set_xlabel("Trajectory Type", fontsize=12)
     ax.set_ylabel("Position RMSE [m]", fontsize=12)
@@ -613,8 +535,6 @@ def main():
                 color=C_EDMDC, lw=1.5, label=f"EDMDc ({r['edmdc']:.3f}m)", zorder=3)
         ax.plot(r["X_lin"][::ds, 0], r["X_lin"][::ds, 1], r["X_lin"][::ds, 2],
                 color=C_LIN, lw=1.2, ls="--", label=f"Linear ({r['linear']:.3f}m)", zorder=3)
-        ax.plot(r["X_nmpc"][::ds, 0], r["X_nmpc"][::ds, 1], r["X_nmpc"][::ds, 2],
-                color=C_NMPC, lw=1.2, ls="-.", label=f"NMPC ({r['nmpc']:.3f}m)", zorder=3)
         # Start marker
         ax.scatter([ref[0, 0]], [ref[0, 1]], [ref[0, 2]],
                    c="red", s=60, marker="o", zorder=4, label="Start")
@@ -645,16 +565,14 @@ def main():
                     color=C_EDMDC, lw=1.5, label="EDMDc MPC", zorder=3)
             ax.plot(thin(t), thin(r["X_lin"][:, j]),
                     color=C_LIN, lw=1.2, ls="--", label="Linear MPC", zorder=3)
-            ax.plot(thin(t), thin(r["X_nmpc"][:, j]),
-                    color=C_NMPC, lw=1.2, ls="-.", label="NMPC", zorder=3)
             ax.set_ylabel(axis_labels[j], fontsize=11)
             ax.grid(True, alpha=0.3)
             if j == 0:
-                ax.legend(fontsize=9, ncol=5, loc="upper right")
+                ax.legend(fontsize=9, ncol=4, loc="upper right")
         axes_xyz[-1].set_xlabel("Time [s]", fontsize=11)
         fig_xyz.suptitle(
             f"{r['name']} — Position Tracking\n"
-            f"PID={r['pid']:.4f}m   EDMDc={r['edmdc']:.4f}m   Linear={r['linear']:.4f}m   NMPC={r['nmpc']:.4f}m",
+            f"PID={r['pid']:.4f}m   EDMDc={r['edmdc']:.4f}m   Linear={r['linear']:.4f}m",
             fontsize=13, fontweight="bold")
         plt.tight_layout()
 
@@ -668,12 +586,10 @@ def main():
         err_pid   = np.linalg.norm(r["X_pid"][:, 0:3] - ref, axis=1)
         err_edmdc = np.linalg.norm(r["X_edmd"][:, 0:3] - ref, axis=1)
         err_lin   = np.linalg.norm(r["X_lin"][:, 0:3]  - ref, axis=1)
-        err_nmpc = np.linalg.norm(r["X_nmpc"][:, 0:3] - ref, axis=1)
 
         ax.plot(thin(t), thin(err_pid),   color=C_PID, lw=1, alpha=0.6, label="PID")
         ax.plot(thin(t), thin(err_edmdc), color=C_EDMDC, lw=1.2, label="EDMDc")
         ax.plot(thin(t), thin(err_lin),   color=C_LIN, lw=1, ls="--", label="Linear")
-        ax.plot(thin(t), thin(err_nmpc), color=C_NMPC, lw=1, ls="-.", label="NMPC")
         ax.set_title(f"{r['name']}", fontsize=11, fontweight="bold")
         ax.set_xlabel("t [s]", fontsize=10)
         ax.set_ylabel("||pos error|| [m]", fontsize=10)
@@ -696,8 +612,6 @@ def main():
                 color=C_EDMDC, lw=1.2, label="EDMDc MPC")
         ax.plot(thin(r["t_ref"]), thin(r["U_lin"][:, j]),
                 color=C_LIN, lw=1, ls="--", label="Linear MPC")
-        ax.plot(thin(r["t_ref"]), thin(r["U_nmpc"][:, j]),
-                color=C_NMPC, lw=1, ls="-.", label="NMPC")
         ax.set_ylabel(u_labels[j], fontsize=11)
         ax.grid(True, alpha=0.3)
         if j == 0:
@@ -713,12 +627,9 @@ def main():
     names  = [r["name"] for r in all_results]
     t_edmd = [r["edmdc_time"] for r in all_results]
     t_lin  = [r["linear_time"] for r in all_results]
-    t_nmpc = [r["nmpc_time"] for r in all_results]
     x_pos  = np.arange(n_cases)
-    w = 0.25
-    ax_st.bar(x_pos - 0.15, t_edmd, w, label="EDMDc MPC", color=C_EDMDC)
-    ax_st.bar(x_pos + 0.15, t_lin,  w, label="Linear MPC", color=C_LIN)
-    ax_st.bar(x_pos + w, t_nmpc, w, label="NMPC", color=C_NMPC)
+    ax_st.bar(x_pos - 0.15, t_edmd, 0.3, label="EDMDc MPC", color=C_EDMDC)
+    ax_st.bar(x_pos + 0.15, t_lin,  0.3, label="Linear MPC", color=C_LIN)
     ax_st.set_ylabel("Solve time [ms]", fontsize=11)
     ax_st.set_title("Computational Cost Comparison", fontsize=13, fontweight="bold")
     ax_st.set_xticks(x_pos)
