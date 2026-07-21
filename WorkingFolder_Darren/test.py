@@ -16,7 +16,7 @@ from Simulation import quad_sim
 SCRIPT_DIR = Path(__file__).resolve().parent
 DATA_DIR = SCRIPT_DIR  # change if CSVs are in a subfolder
 noise_std = 0.0    # Gaussian noise std; 0 to disable
-dt = 0.1               # time step (s)
+dt = 0.01               # time step (s)
 
 enable_filter = True
 filter_type = 'savgol'  # 'savgol' or 'butter'
@@ -168,20 +168,14 @@ def observables(x):
     #    - you already had sin/cos(yaw)
     #    - add sin/cos for roll (phi) and pitch (theta) too
     # ----------------------------------------------------
-    # Un-standardize yaw to get back to degrees for trigs,
-    # same as your original code. (psi index = 8)
+    # Un-standardize angles back to radians for trigs.
     yaw_std = x[8]
-    yaw_raw = yaw_std * scaler.scale_[8] + scaler.mean_[8]  # deg
-    yaw_rad = np.deg2rad(yaw_raw)
+    yaw_rad = yaw_std * scaler.scale_[8] + scaler.mean_[8]
 
-    # For phi, theta you likely stored them in degrees originally,
-    # standardized by 'scaler', so we unscale similarly:
     phi_std = x[6]
     theta_std = x[7]
-    phi_raw = phi_std * scaler.scale_[6] + scaler.mean_[6]
-    theta_raw = theta_std * scaler.scale_[7] + scaler.mean_[7]
-    phi_rad = np.deg2rad(phi_raw)
-    theta_rad = np.deg2rad(theta_raw)
+    phi_rad = phi_std * scaler.scale_[6] + scaler.mean_[6]
+    theta_rad = theta_std * scaler.scale_[7] + scaler.mean_[7]
 
     s_yaw, c_yaw = np.sin(yaw_rad), np.cos(yaw_rad)
     s_phi, c_phi = np.sin(phi_rad), np.cos(phi_rad)
@@ -284,7 +278,7 @@ ax.grid(True)
 # Plot results
 # ====================================================
 labels = ['x','y','z','vx','vy','vz','phi','theta','psi','p','q','r']
-units  = ['m','m','m','m/s','m/s','m/s','deg','deg','deg','rad/s','rad/s','rad/s']
+units  = ['m','m','m','m/s','m/s','m/s','rad','rad','rad','rad/s','rad/s','rad/s']
 
 fig, axs = plt.subplots(3, 4, figsize=(16, 9))
 for i, ax in enumerate(axs.flatten()):
@@ -302,7 +296,7 @@ plt.tight_layout()
 # Plot results
 # ====================================================
 labels = ['x','y','z','vx','vy','vz','phi','theta','psi','p','q','r']
-units  = ['m','m','m','m/s','m/s','m/s','deg','deg','deg','rad/s','rad/s','rad/s']
+units  = ['m','m','m','m/s','m/s','m/s','rad','rad','rad','rad/s','rad/s','rad/s']
 
 fig, axs = plt.subplots(3, 4, figsize=(16, 9))
 for i, ax in enumerate(axs.flatten()):

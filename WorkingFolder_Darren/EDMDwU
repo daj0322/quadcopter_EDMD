@@ -127,8 +127,8 @@ def observables(x):
     for combo in itertools.combinations_with_replacement(range(n), 2):
         obs.append(np.prod([x[i] for i in combo]))
     # trig terms for yaw (psi)
-    yaw_raw = x[8] * scaler.scale_[8] + scaler.mean_[8]  # psi index 8
-    s, c = np.sin(np.deg2rad(yaw_raw)), np.cos(np.deg2rad(yaw_raw))
+    yaw_raw = x[8] * scaler.scale_[8] + scaler.mean_[8]  # psi index 8, radians
+    s, c = np.sin(yaw_raw), np.cos(yaw_raw)
     obs += [s, c, 1.0]
     return np.array(obs)
 
@@ -248,7 +248,7 @@ plt.show()
 # Plot results
 # ====================================================
 labels = ['x','y','z','vx','vy','vz','phi','theta','psi','p','q','r']
-units  = ['m','m','m','m/s','m/s','m/s','deg','deg','deg','rad/s','rad/s','rad/s']
+units  = ['m','m','m','m/s','m/s','m/s','rad','rad','rad','rad/s','rad/s','rad/s']
 
 fig, axs = plt.subplots(3, 4, figsize=(16, 9))
 for i, ax in enumerate(axs.flatten()):

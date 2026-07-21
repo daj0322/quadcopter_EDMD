@@ -1,7 +1,7 @@
 import numpy as np
 import random
 from quadcopter import quadcopter
-from Cascaded_Controllers import QuadPIDController6Fixed
+from Cascaded_Controllers import QuadPIDController6Fixed, QuadPX4LikeController
 from Closed_loop import ClosedLoopQuad
 
 class quad_sim:
@@ -10,19 +10,19 @@ class quad_sim:
     q_mass = 0.5 # kg
     g = 9.81 # m/s
     q_l = 0.2 # m
-    kD = 1e-9
+    kD = 1e-7
     kT = 3e-5
     k_drag_linear = 0.5
     k_drag_angular = 0.02
     Ixx, Iyy, Izz = 5e-3, 5e-3, 9e-3
     I = np.diag([Ixx, Iyy, Izz])
 
-    kp_pos = [0.95, 0.95, 15.] #[x,y,z]
+    kp_pos = [2.0, 2.0, 15.] #[x,y,z]
     ki_pos = [0.2, 0.2, 5.] #[x,y,z]
-    kd_pos = [1.8, 1.8, 15.] #[x,y,z]
-    kp_ang = [6.9, 6.9, 25.] #[phi,theta,psi]
+    kd_pos = [3.2, 3.2, 15.] #[x,y,z]
+    kp_ang = [6.9, 6.9, 50.] #[phi,theta,psi]
     ki_ang = [0.1, 0.1, 0.1] #[phi,theta,psi]
-    kd_ang = [3.7, 3.7, 9.] #[phi,theta,psi]
+    kd_ang = [3.7, 3.7, 5.] #[phi,theta,psi]
 
     max_speed = 400.0
 
@@ -38,11 +38,40 @@ class quad_sim:
         tilt_max_deg=45.0,
         torque_roll_pitch_max=0.10)
 
-    sim_PID = ClosedLoopQuad(quad, controller_PID)
+    controller_PX4 = QuadPX4LikeController(
+        quad,
+        max_speed=max_speed,
+        pos_p=(2.2, 2.2, 2.0),
+        vel_p=(5.0, 5.0, 5.0),
+        vel_i=(0.08, 0.08, 1.0),
+        att_p=(11.0, 11.0, 10.0),
+        rate_p=(0.12, 0.12, 0.03),
+        rate_sp_max=(4.0, 4.0, 1.1),
+        vel_sp_max_xy=4.0,
+        vel_sp_max_z=3.0,
+        acc_max_xy=5.0,
+        acc_max_z=5.0,
+        tilt_max_deg=45.0,
+        thrust_max=12.0,
+        torque_max=(0.12, 0.12, 0.02))
+
+    sim_PID = ClosedLoopQuad(quad, controller_PX4)
 
     # Time setup
     dt = 0.01
     time = np.arange(0.0, 35.0, dt)
+
+    def fct_unwrap_trajectory_yaw(self, traj):
+        yaws = np.unwrap([r["yaw"] for r in traj])
+        for r, yaw in zip(traj, yaws):
+            r["yaw"] = float(yaw)
+        return traj
+
+    def fct_smooth_time_scaling(self, tau, T):
+        sigma = 10.0 * tau**3 - 15.0 * tau**4 + 6.0 * tau**5
+        sigma_dot = (30.0 * tau**2 - 60.0 * tau**3 + 30.0 * tau**4) / T
+        sigma_ddot = (60.0 * tau - 180.0 * tau**2 + 120.0 * tau**3) / T**2
+        return sigma, sigma_dot, sigma_ddot
 
     def fct_make_helical_trajectory(self, time,
                                     center=(0.0, 0.0),
@@ -79,34 +108,47 @@ class quad_sim:
         traj = []
         for t in time:
             tau = (t - t0) / T  # normalized time in [0,1]
+            sigma, sigma_dot, sigma_ddot = self.fct_smooth_time_scaling(tau, T)
 
             # Angle (n_turns full revolutions)
-            theta = 2.0 * np.pi * n_turns * tau
-            theta_dot = 2.0 * np.pi * n_turns / T
+            theta = 2.0 * np.pi * n_turns * sigma
+            theta_dot = 2.0 * np.pi * n_turns * sigma_dot
+            theta_ddot = 2.0 * np.pi * n_turns * sigma_ddot
 
             # Position
             x = cx + radius * np.cos(theta)
             y = cy + radius * np.sin(theta)
-            z = z_start + (z_end - z_start) * tau
+            z = z_start + (z_end - z_start) * sigma
 
             # Velocity (derivatives)
             vx = -radius * np.sin(theta) * theta_dot
             vy =  radius * np.cos(theta) * theta_dot
-            vz = (z_end - z_start) / T
+            vz = (z_end - z_start) * sigma_dot
+
+            # Acceleration (derivatives)
+            ax = -radius * (np.cos(theta) * theta_dot**2 + np.sin(theta) * theta_ddot)
+            ay = radius * (-np.sin(theta) * theta_dot**2 + np.cos(theta) * theta_ddot)
+            az = (z_end - z_start) * sigma_ddot
 
             # Yaw: either follow the tangent direction or stay fixed
             if yaw_follows_path:
-                yaw = np.arctan2(vy, vx)  # heading along the path
+                tangent_x = -radius * np.sin(theta)
+                tangent_y = radius * np.cos(theta)
+                yaw = np.arctan2(tangent_y, tangent_x)  # heading along the path
+                yaw_rate = theta_dot
             else:
                 yaw = 0.0  # or any constant you like
+                yaw_rate = 0.0
 
             traj.append({
                 "pos": np.array([x, y, z], dtype=float),
                 "vel": np.array([vx, vy, vz], dtype=float),
-                "yaw": float(yaw)
+                "acc": np.array([ax, ay, az], dtype=float),
+                "yaw": float(yaw),
+                "yaw_rate": float(yaw_rate)
             })
 
-        return traj
+        return self.fct_unwrap_trajectory_yaw(traj)
 
     def fct_make_figure8_trajectory(self, time,
                                     center=(0.0, 0.0, 1.0),
@@ -167,10 +209,13 @@ class quad_sim:
 
         traj = []
         for t in time:
-            tr = t - t0
+            tau = (t - t0) / T
+            sigma, sigma_dot, sigma_ddot = self.fct_smooth_time_scaling(tau, T)
 
             # ---- base planar figure-8 (XY plane) ----
-            s    = omega * tr
+            s    = 2.0 * np.pi * n_loops * sigma
+            s_dot = 2.0 * np.pi * n_loops * sigma_dot
+            s_ddot = 2.0 * np.pi * n_loops * sigma_ddot
             sin_s = np.sin(s)
             cos_s = np.cos(s)
 
@@ -180,10 +225,14 @@ class quad_sim:
             z_local = 0.0
 
             # Velocity in local frame (time derivatives)
-            dx_local = a * omega * cos_s
+            dx_local = a * cos_s * s_dot
             # derivative of b*sin(s)*cos(s) = b*omega*(cos^2 - sin^2) = b*omega*cos(2s)
-            dy_local = b * omega * (cos_s**2 - sin_s**2)
+            dy_local = b * (cos_s**2 - sin_s**2) * s_dot
             dz_local = 0.0
+
+            ddx_local = a * (cos_s * s_ddot - sin_s * s_dot**2)
+            ddy_local = b * ((cos_s**2 - sin_s**2) * s_ddot - 4.0 * sin_s * cos_s * s_dot**2)
+            ddz_local = 0.0
 
             # ---- rotate around X-axis to introduce z-variation ----
             # x' = x
@@ -197,6 +246,10 @@ class quad_sim:
             dy_world = dy_local * cth
             dz_world = dy_local * sth
 
+            ddx_world = ddx_local
+            ddy_world = ddy_local * cth
+            ddz_world = ddy_local * sth
+
             # ---- shift to center ----
             x = cx + x_world
             y = cy + y_world
@@ -206,20 +259,30 @@ class quad_sim:
             vy = dy_world
             vz = dz_world
 
+            ax = ddx_world
+            ay = ddy_world
+            az = ddz_world
+
             # ---- yaw ----
             if yaw_follows_path:
                 # Heading in the XY plane
-                yaw = np.arctan2(vy, vx)
+                tangent_x = a * cos_s
+                tangent_y = b * (cos_s**2 - sin_s**2) * cth
+                yaw = np.arctan2(tangent_y, tangent_x)
+                yaw_rate = (vx * ay - vy * ax) / (vx**2 + vy**2 + 1e-12)
             else:
                 yaw = float(yaw_constant)
+                yaw_rate = 0.0
 
             traj.append({
                 "pos": np.array([x, y, z], dtype=float),
                 "vel": np.array([vx, vy, vz], dtype=float),
-                "yaw": float(yaw)
+                "acc": np.array([ax, ay, az], dtype=float),
+                "yaw": float(yaw),
+                "yaw_rate": float(yaw_rate)
             })
 
-        return traj
+        return self.fct_unwrap_trajectory_yaw(traj)
 
     def fct_run_simulation(self, traj, n):
         """

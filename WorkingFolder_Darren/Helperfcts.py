@@ -47,3 +47,13 @@ class helperfcts:
         rms_z = float(np.sqrt(integral / Tz))
 
         return rms_xy, rms_z
+
+    def fct_rms_yaw_error(states, ref_traj, dt):
+        psi_ref = np.array([r["yaw"] for r in ref_traj], dtype=float)
+        epsi = helperfcts.wrap_angle(states[:, 8] - psi_ref)**2
+
+        Tyaw = (len(epsi) - 1) * dt
+        integral = np.trapezoid(epsi, dx=dt)
+        rms_yaw = float(np.sqrt(integral / Tyaw))
+
+        return rms_yaw

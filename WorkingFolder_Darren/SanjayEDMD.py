@@ -67,7 +67,7 @@ n_runs = 5          # number of trajectories for training
 traj_id = 2         # which trajectory type to use from quad_sim (1: helical or 2: figure eight)
 
 quad = quad_sim()
-t_all, states_all, U_all = quad.fct_run_simulation(traj_id, n_runs)
+t_all, states_all, U_all, ref_traj_list = quad.fct_run_simulation(traj_id, n_runs)
 # t_all.shape      = (n_runs, T)
 # states_all.shape = (n_runs, T, 12)
 # U_all.shape      = (n_runs, T, n_inputs)
@@ -169,20 +169,14 @@ def observables(x):
     #    - you already had sin/cos(yaw)
     #    - add sin/cos for roll (phi) and pitch (theta) too
     # ----------------------------------------------------
-    # Un-standardize yaw to get back to degrees for trigs,
-    # same as your original code. (psi index = 8)
+    # Un-standardize angles back to radians for trigs.
     yaw_std = x[8]
-    yaw_raw = yaw_std * scaler.scale_[8] + scaler.mean_[8]  # deg
-    yaw_rad = np.deg2rad(yaw_raw)
+    yaw_rad = yaw_std * scaler.scale_[8] + scaler.mean_[8]
 
-    # For phi, theta you likely stored them in degrees originally,
-    # standardized by 'scaler', so we unscale similarly:
     phi_std = x[6]
     theta_std = x[7]
-    phi_raw = phi_std * scaler.scale_[6] + scaler.mean_[6]
-    theta_raw = theta_std * scaler.scale_[7] + scaler.mean_[7]
-    phi_rad = np.deg2rad(phi_raw)
-    theta_rad = np.deg2rad(theta_raw)
+    phi_rad = phi_std * scaler.scale_[6] + scaler.mean_[6]
+    theta_rad = theta_std * scaler.scale_[7] + scaler.mean_[7]
 
     s_yaw, c_yaw = np.sin(yaw_rad), np.cos(yaw_rad)
     s_phi, c_phi = np.sin(phi_rad), np.cos(phi_rad)
@@ -235,7 +229,7 @@ x_pred = scaler.inverse_transform(Psi_pred[:12, :].T).T
 # Plot results
 # ====================================================
 labels = ['x','y','z','vx','vy','vz','phi','theta','psi','p','q','r']
-units  = ['m','m','m','m/s','m/s','m/s','deg','deg','deg','rad/s','rad/s','rad/s']
+units  = ['m','m','m','m/s','m/s','m/s','rad','rad','rad','rad/s','rad/s','rad/s']
 
 fig, axs = plt.subplots(3, 4, figsize=(16, 9))
 for i, ax in enumerate(axs.flatten()):
