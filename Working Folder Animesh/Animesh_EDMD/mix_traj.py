@@ -10,42 +10,45 @@ def load_simulation_runs(filename):
 
 def infer_family_label(data, filename):
     traj = data.get("traj", None)
-    if traj == 1:                    return "helix"
-    elif traj == 2:                  return "fig8"
-    elif traj == 3:                  return "lissajous"
-    elif traj == 4:                  return "waypoint"
-    elif traj == 5:                  return "hover_excitation"
-    elif traj == "prbs":             return "prbs"
-    elif isinstance(traj, str):      return traj
+    if traj == 1:
+        return "helix"
+    elif traj == 2:
+        return "fig8"
+    elif traj == 3:
+        return "lissajous"
+    elif traj == 4:
+        return "waypoint"
+    elif traj == 5:
+        return "hover_excitation"
+    elif traj == "prbs":
+        return "prbs"
+    elif isinstance(traj, str):
+        return traj
 
     name = Path(filename).stem.lower()
-    if "traj1" in name or "helix"  in name: return "helix"
-    if "traj2" in name or "fig8"   in name: return "fig8"
-    if "traj3" in name or "lissa"  in name: return "lissajous"
-    if "traj4" in name or "wayp"   in name: return "waypoint"
-    if "hover" in name:                      return "hover_excitation"
-    if "prbs"  in name:                      return "prbs"
+    if "traj1" in name or "helix" in name:
+        return "helix"
+    if "traj2" in name or "fig8" in name:
+        return "fig8"
+    if "traj3" in name or "lissa" in name:
+        return "lissajous"
+    if "traj4" in name or "wayp" in name:
+        return "waypoint"
+    if "hover" in name:
+        return "hover_excitation"
+    if "prbs" in name:
+        return "prbs"
     return "unknown"
 
 
 def combine_run_files(file_list, output_file):
     datasets = [load_simulation_runs(f) for f in file_list]
 
-    # Drop degenerate psi_des column if present (col 3, always zero)
-    for d in datasets:
-        if d["U"].shape[2] == 4:
-            pass 
-
-    # Drop psi (col 8), p (col 9), q (col 10), r (col 11)
-    # Keep only [x, y, z, vx, vy, vz, phi, theta] — 8 states
-    # Drop psi, p, q, r — keep only [x, y, z, vx, vy, vz, phi, theta]
-    for d in datasets:
-        if d["states"].shape[2] == 12:
-           pass # Keeping all 12 States for now, as per the latest changes.
-
-        # Debug — check actual shapes before dropping
+    # Keep full yaw-aware logs:
+    # states = [x, y, z, vx, vy, vz, phi, theta, psi, p, q, r]
+    # U      = [thrust, phi_des, theta_des, psi_des]
     for f, d in zip(file_list, datasets):
-        print(f"{Path(f).name}: states shape = {d['states'].shape}")
+        print(f"{Path(f).name}: states shape = {d['states'].shape}, U shape = {d['U'].shape}")
 
     # Compatibility checks against first file
     ref = datasets[0]
@@ -61,12 +64,10 @@ def combine_run_files(file_list, output_file):
         if ref["t"].shape[1:] != data["t"].shape[1:]:
             raise ValueError(f"t shape mismatch at file {i}")
 
-    # Combine
-    t_combined      = np.concatenate([d["t"]      for d in datasets], axis=0)
+    t_combined = np.concatenate([d["t"] for d in datasets], axis=0)
     states_combined = np.concatenate([d["states"] for d in datasets], axis=0)
-
-    U_combined      = np.concatenate([d["U"]      for d in datasets], axis=0)
-    ref_combined    = sum([list(d["ref_traj_list"]) for d in datasets], [])
+    U_combined = np.concatenate([d["U"] for d in datasets], axis=0)
+    ref_combined = sum([list(d["ref_traj_list"]) for d in datasets], [])
 
     family_labels = sum([
         [infer_family_label(d, f)] * d["n"]

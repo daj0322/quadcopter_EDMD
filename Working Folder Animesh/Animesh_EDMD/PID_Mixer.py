@@ -63,8 +63,13 @@ class pid_mixer:
         # T = kT * omega^2  =>  omega = sqrt(T / kT)
         forces = np.array([T0, T1, T2, T3])
         
-        # Clip negative forces to 0
+        # Clip negative forces to 0. If clipping increases the collective
+        # thrust, rescale to preserve the requested total thrust and sacrifice
+        # attitude torque instead of injecting extra lift.
         forces = np.maximum(forces, 0)
+        force_sum = float(np.sum(forces))
+        if total_thrust > 0.0 and force_sum > total_thrust:
+            forces *= total_thrust / force_sum
         
         omega = np.sqrt(forces / kT)
         

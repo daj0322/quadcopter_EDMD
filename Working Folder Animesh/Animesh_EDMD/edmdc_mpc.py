@@ -3,6 +3,11 @@ import numpy as np
 import scipy.sparse as sp
 import osqp
 
+STATE_DIM = 12
+STATE_LABELS = ["x", "y", "z", "vx", "vy", "vz", "phi", "theta", "psi", "p", "q", "r"]
+REDUCED_10_INDICES = [0, 1, 2, 3, 4, 5, 6, 7, 9, 10]
+
+
 # File I/O
 def load_edmdc_model(filename):
     with open(filename, "rb") as f:
@@ -13,13 +18,22 @@ def load_simulation_runs(filename):
         data = pickle.load(f)
     return data["t"], data["states"], data["U"], data["ref_traj_list"]
 
-'''
-def observables(x_std, scaler):
-    """
-    Return the lifted observable vector for a standardized 10-state input.
+# State lifting
+# The current lifted model uses the full 12-state vector:
+# [x, y, z, vx, vy, vz, phi, theta, psi, p, q, r]
+#
+# Observable ordering must remain consistent with EDMDc_training.py:
+#  - states
+#  - sin/cos of roll, pitch, and yaw
+#  - selected cross terms
+#  - quadratic energy-like terms
+#  - constant bias
 
-    The observable definition must match the lifting used during training.
-    """
+def _scaler_state_dim(scaler):
+    return int(getattr(scaler, "n_features_in_", len(getattr(scaler, "mean_", []))))
+
+
+def _observables_10state(x_std, scaler):
     x = np.asarray(x_std).flatten()
     assert len(x) == 10, f"Expected 10-state vector, got {len(x)}"
 
@@ -51,84 +65,128 @@ def observables(x_std, scaler):
     obs.append(1.0)
 
     return np.asarray(obs, dtype=float)
-'''
 
-def observables(x, scaler):
-    """
-    Return the lifted observable vector for a standardized 12-state input.
 
-    State vector x (12D):
-    [0]  x      [1]  y      [2]  z
-    [3]  vx     [4]  vy     [5]  vz
-    [6]  phi    [7]  theta  [8]  psi
-    [9]  p      [10] q      [11] r
+def _observables_12state(x_std, scaler):
+    x = np.asarray(x_std).flatten()
+    assert len(x) == STATE_DIM, f"Expected 12-state vector, got {len(x)}"
 
-    Observable layout (33D total):
-    [0-11]  12 linear states
-    [12-15] sin(phi), cos(phi), sin(theta), cos(theta)
-    [16-19] phi*p, theta*q, vx*phi, vy*theta
-    [20-21] v_sq, omega_sq
-    [22-27] vx*theta, vy*phi, vz², phi², theta², p*q
-    [28-29] sin(psi), cos(psi)
-    [30]    psi*r
-    [31]    psi²
-    [32]    bias
-    """
-    x = np.asarray(x).flatten()
-    assert len(x) == 12, f"Expected 12-state vector, got {len(x)}"
+    obs = list(x)  # 12 linear terms
 
-    obs = list(x)  # [0-11] 12 linear states
+    phi_rad   = x[6] * scaler.scale_[6] + scaler.mean_[6]
+    theta_rad = x[7] * scaler.scale_[7] + scaler.mean_[7]
+    psi_rad   = x[8] * scaler.scale_[8] + scaler.mean_[8]
 
-    # Unscale angles back to radians
-    phi_rad   = x[6]  * scaler.scale_[6]  + scaler.mean_[6]
-    theta_rad = x[7]  * scaler.scale_[7]  + scaler.mean_[7]
-    psi_rad   = x[8]  * scaler.scale_[8]  + scaler.mean_[8]
+    s_phi, c_phi = np.sin(phi_rad), np.cos(phi_rad)
+    s_theta, c_theta = np.sin(theta_rad), np.cos(theta_rad)
+    s_psi, c_psi = np.sin(psi_rad), np.cos(psi_rad)
 
-    # [12-15] sin/cos of roll and pitch — unchanged from before
-    obs.append(np.sin(phi_rad))
-    obs.append(np.cos(phi_rad))
-    obs.append(np.sin(theta_rad))
-    obs.append(np.cos(theta_rad))
+    obs.extend([
+        s_phi, c_phi,
+        s_theta, c_theta,
+        s_psi, c_psi,
+    ])
 
-    # [16-19] cross terms — same as before, just index shifts (p=9, q=10)
-    obs.append(x[6] * x[9])    # phi * p
-    obs.append(x[7] * x[10])   # theta * q
-    obs.append(x[3] * x[6])    # vx * phi
-    obs.append(x[4] * x[7])    # vy * theta
+    obs.extend([
+        x[6] * x[9],     # phi * p
+        x[7] * x[10],    # theta * q
+        x[8] * x[11],    # psi * r
+        x[3] * x[6],     # vx * phi
+        x[4] * x[7],     # vy * theta
+        x[3] * x[8],     # vx * psi
+        x[4] * x[8],     # vy * psi
+        x[5] * x[7],     # vz * theta
+    ])
 
-    # [20-21] energy-like terms
-    obs.append(x[3]**2 + x[4]**2 + x[5]**2)   # v_sq
-    obs.append(x[9]**2 + x[10]**2)             # omega_sq (p² + q² only, same as before)
+    obs.extend([
+        x[3]**2 + x[4]**2 + x[5]**2,       # v_sq
+        x[9]**2 + x[10]**2 + x[11]**2,     # omega_sq
+    ])
 
-    # [22-27] targeted quadratics — unchanged from before
-    obs.append(x[3] * x[7])    # vx * theta
-    obs.append(x[4] * x[6])    # vy * phi
-    obs.append(x[5] * x[5])    # vz²
-    obs.append(x[6] * x[6])    # phi²
-    obs.append(x[7] * x[7])    # theta²
-    obs.append(x[9] * x[10])   # p * q
+    obs.extend([
+        x[5] * x[5],     # vz^2
+        x[6] * x[6],     # phi^2
+        x[7] * x[7],     # theta^2
+        x[8] * x[8],     # psi^2
+        x[9] * x[10],    # p * q
+        x[10] * x[11],   # q * r
+        x[9] * x[11],    # p * r
+    ])
 
-    # [28-31] NEW yaw terms
-    obs.append(np.sin(psi_rad)) # sin(psi)
-    obs.append(np.cos(psi_rad)) # cos(psi)
-    obs.append(x[8] * x[11])   # psi * r
-    obs.append(x[8] * x[8])    # psi²
+    vx, vy, vz = x[3], x[4], x[5]
+    body_vx = c_theta*c_psi*vx + c_theta*s_psi*vy - s_theta*vz
+    body_vy = (s_phi*s_theta*c_psi - c_phi*s_psi)*vx + \
+              (s_phi*s_theta*s_psi + c_phi*c_psi)*vy + \
+              s_phi*c_theta*vz
+    body_vz = (c_phi*s_theta*c_psi + s_phi*s_psi)*vx + \
+              (c_phi*s_theta*s_psi - s_phi*c_psi)*vy + \
+              c_phi*c_theta*vz
 
-    # [32] bias — always last
+    thrust_dir_x = c_psi*s_theta*c_phi + s_psi*s_phi
+    thrust_dir_y = s_psi*s_theta*c_phi - c_psi*s_phi
+    thrust_dir_z = c_theta*c_phi
+
+    obs.extend([
+        body_vx, body_vy, body_vz,
+        thrust_dir_x, thrust_dir_y, thrust_dir_z,
+    ])
+
     obs.append(1.0)
 
-    return np.array(obs, dtype=float)
+    return np.asarray(obs, dtype=float)
 
 
-def lifted_state_from_x(x12, scaler):
-    """Map a physical 12-state vector to the lifted observable space."""
-    x_std = scaler.transform(x12.reshape(1, -1)).flatten()
+def observables(x_std, scaler):
+    """
+    Return the lifted observable vector for a standardized state.
+
+    The observable definition must match the lifting used during training.
+    A 10-state branch is kept only so old 10-state model files can still load.
+    """
+    expected_dim = _scaler_state_dim(scaler)
+    if expected_dim == 10:
+        return _observables_10state(x_std, scaler)
+    if expected_dim == STATE_DIM:
+        return _observables_12state(x_std, scaler)
+    raise ValueError(f"Unsupported scaler state dimension: {expected_dim}")
+
+
+def drop_to_10state(x12):
+    """Convert a 12-state vector to the legacy reduced 10-state representation."""
+    x = np.asarray(x12, dtype=float).flatten()
+    if len(x) == 10:
+        return x.copy()
+    if len(x) < STATE_DIM:
+        raise ValueError(f"Expected at least 12 entries, got {len(x)}")
+    return x[REDUCED_10_INDICES].copy()
+
+
+def drop_to_12state(x_state):
+    """Convert a plant/logged state to the full EDMD 12-state representation."""
+    x = np.asarray(x_state, dtype=float).flatten()
+    if len(x) >= STATE_DIM:
+        return x[:STATE_DIM].copy()
+    if len(x) == 10:
+        x12 = np.zeros(STATE_DIM)
+        x12[0:6] = x[0:6]
+        x12[6:8] = x[6:8]
+        x12[9:11] = x[8:10]
+        return x12
+    raise ValueError(f"Expected 10-state or 12-state vector, got {len(x)}")
+
+
+def lifted_state_from_x(x_state, scaler):
+    """Map a physical state vector to the lifted observable space."""
+    expected_dim = _scaler_state_dim(scaler)
+    if expected_dim == 10:
+        x_phys = drop_to_10state(x_state)
+    elif expected_dim == STATE_DIM:
+        x_phys = drop_to_12state(x_state)
+    else:
+        raise ValueError(f"Unsupported scaler state dimension: {expected_dim}")
+
+    x_std = scaler.transform(x_phys.reshape(1, -1)).flatten()
     return observables(x_std, scaler)
-
-
-def drop_to_12state(x12):
-    'Return the full 12-state vector - no dropping needed with yaw included.'
-    return x12
 
 
 # MPC solver
@@ -151,9 +209,7 @@ class EDMDcMPC_QP:
         self.Rd = np.asarray(Rd, dtype=float)
 
         self.u_scaler      = u_scaler
-        self.u_nom_raw     = np.asarray(u_nominal_raw, dtype=float)
-        self.u_nom_scaled  = u_scaler.transform(
-            self.u_nom_raw.reshape(1, -1)).flatten()
+        self._set_nominal_input(u_nominal_raw)
 
         self.du_min = np.asarray(du_min, dtype=float)
         self.du_max = np.asarray(du_max, dtype=float)
@@ -197,6 +253,13 @@ class EDMDcMPC_QP:
                         A=Aineq, l=l, u=u,
                         warm_start=True, verbose=False, polish=False)
 
+    def _set_nominal_input(self, u_nominal_raw):
+        self.u_nom_raw = np.asarray(u_nominal_raw, dtype=float)
+        self.u_nom_scaled = self.u_scaler.transform(
+            self.u_nom_raw.reshape(1, -1)).flatten()
+        if hasattr(self, "NC"):
+            self.u_nom_horizon_scaled = np.tile(self.u_nom_scaled, self.NC)
+
     def _build_prediction_matrices(self):
         Sz = np.zeros((self.N * self.nz, self.nz))
         Su = np.zeros((self.N * self.nz, self.NC * self.nu))
@@ -205,9 +268,12 @@ class EDMDcMPC_QP:
             A_pow.append(A_pow[-1] @ self.A)
         for i in range(self.N):
             Sz[i*self.nz:(i+1)*self.nz, :] = A_pow[i+1]
-            for j in range(min(i+1, self.NC)):
-                Su[i*self.nz:(i+1)*self.nz, j*self.nu:(j+1)*self.nu] = \
-                    A_pow[i-j] @ self.B
+            for input_step in range(i + 1):
+                # The optimized command is held constant after the control
+                # horizon, so the last decision block affects all later steps.
+                j = min(input_step, self.NC - 1)
+                Su[i*self.nz:(i+1)*self.nz, j*self.nu:(j+1)*self.nu] += \
+                    A_pow[i-input_step] @ self.B
         return sp.csc_matrix(Sz), sp.csc_matrix(Su)
 
     def _build_difference_matrix(self):
@@ -231,7 +297,10 @@ class EDMDcMPC_QP:
         return (0.5 * (P + P.T)).tocsc()
 
     def _build_q(self, z0, x_ref_std_horizon):
-        z_free = self.Sz @ z0
+        # The learned EDMD model uses absolute standardized inputs. The QP
+        # variables are deltas around the nominal input, so the nominal input
+        # response must be part of the free trajectory.
+        z_free = self.Sz @ z0 + self.Su @ self.u_nom_horizon_scaled
         x_free = np.array([
             self.Cz @ z_free[i*self.nz:(i+1)*self.nz]
             for i in range(self.N)
@@ -241,7 +310,10 @@ class EDMDcMPC_QP:
             self.Su_phys.T @ (self.Qbar @ (x_free - x_ref))
         ).reshape(-1)
 
-    def compute(self, z0, x_ref_std_horizon):
+    def compute(self, z0, x_ref_std_horizon, u_nominal_raw=None):
+        if u_nominal_raw is not None:
+            self._set_nominal_input(u_nominal_raw)
+
         q = self._build_q(z0, x_ref_std_horizon)
         self.prob.update(q=q)
         self.prob.warm_start(x=self._du_prev)
@@ -258,22 +330,61 @@ class EDMDcMPC_QP:
         u0_scaled = self.u_nom_scaled + du0
         u0_raw    = self.u_scaler.inverse_transform(
             u0_scaled.reshape(1, -1)).flatten()
-        return u0_raw  # [thrust, phi_des, theta_des, psi_des]
+        return u0_raw  # [thrust, phi_des, theta_des]
 
 
 # Reference processing
+def wrap_angle_pi(angle):
+    return (np.asarray(angle, dtype=float) + np.pi) % (2.0 * np.pi) - np.pi
+
+
+def reference_yaw_arrays(ref_traj, dt=None):
+    """Return unwrapped yaw and yaw-rate references for a trajectory list."""
+    yaw = np.unwrap([
+        float(wp.get("yaw", 0.0)) for wp in ref_traj
+    ])
+
+    yaw_rate = np.zeros_like(yaw)
+    explicit = [
+        float(wp["yaw_rate"]) if "yaw_rate" in wp else np.nan
+        for wp in ref_traj
+    ]
+    explicit = np.asarray(explicit, dtype=float)
+    has_explicit = np.isfinite(explicit)
+    if np.any(has_explicit):
+        yaw_rate[has_explicit] = explicit[has_explicit]
+
+    if np.any(~has_explicit) and dt is not None and len(yaw) > 1:
+        computed = np.gradient(yaw, float(dt))
+        yaw_rate[~has_explicit] = computed[~has_explicit]
+
+    return yaw, yaw_rate
+
+
 def extract_ref_xyz(ref_traj):
     return np.array([wp["pos"][:3] for wp in ref_traj], dtype=float)
 
 
-def precompute_ref_std(ref_traj, scaler, n_states=12):
-    """Build a standardized reference trajectory using position and velocity."""
+def precompute_ref_std(ref_traj, scaler, n_states=None, dt=None):
+    """Build a standardized reference trajectory using position, velocity, and yaw."""
     T = len(ref_traj)
+    expected_dim = _scaler_state_dim(scaler)
+    if n_states is None or n_states != expected_dim:
+        n_states = expected_dim
+
     X_ref = np.zeros((T, n_states))
+    yaw_values = None
+    yaw_rate_values = None
+    if n_states >= STATE_DIM:
+        yaw_values, yaw_rate_values = reference_yaw_arrays(ref_traj, dt=dt)
+
     for k in range(T):
         X_ref[k, 0:3] = ref_traj[k]["pos"][:3]
         X_ref[k, 3:6] = ref_traj[k]["vel"][:3]
-        X_ref[k,8] = ref_traj[k]["yaw"] #psi reference at index 8
+        if yaw_values is not None:
+            X_ref[k, 8] = yaw_values[k]
+        if yaw_rate_values is not None:
+            X_ref[k, 11] = yaw_rate_values[k]
     return scaler.transform(X_ref)
 
 

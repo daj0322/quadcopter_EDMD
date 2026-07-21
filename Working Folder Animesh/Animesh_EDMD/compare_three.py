@@ -20,10 +20,12 @@ from edmdc_mpc import (
     load_edmdc_model,
     load_simulation_runs,
     lifted_state_from_x,
-    drop_to_10state,
+    drop_to_12state,
     precompute_ref_std,
     build_ref_horizon,
     extract_ref_xyz,
+    reference_yaw_arrays,
+    wrap_angle_pi,
     rmse,
 )
 
@@ -31,51 +33,45 @@ from edmdc_mpc import (
 # CONFIG
 # ============================================================
 SCRIPT_DIR       = Path(__file__).resolve().parent
-EDMDC_MODEL_FILE = "edmdc_model_300_0.01.pkl"
+EDMDC_MODEL_FILE = "edmdc_model_300.pkl"
 DATA_FILE        = "runs_mixed_n300.pkl"
+# Use the full downsampled 100 s trajectory. A 300-step cap only shows the
+# first 30 s, so the figure-8 reference never completes its full loop.
+MAX_STEPS        = None
 
 # Test indices — one per trajectory family
 TEST_CASES = [
     (39,  "helix (small)"),
-    (59,  "figure-8_1"),
-    (59,  "figure-8_2"),
+    (59,  "figure-8"),
     (129, "lissajous"),
     (155, "waypoint"),
     (210, "hover excitation"),
 ]
-'''
-#for 0.1s
-# MPC config (use tuned values)
+
+# MPC config for the 0.1 s EDMD model produced by EDMDc_training.py.
 N_MPC   = 30
-NC_MPC  = 25 
+NC_MPC  = 15
 
 Q_DIAG = np.array([
-    125000.0, 125000.0, 125000.0,
-        50.0,     50.0,     50.0,
-         0.0,      0.0,
-         0.0,      0.0,
+     75000.0, 120000.0,  75000.0,
+     20000.0,  32000.0,  20000.0,
+         0.0,      0.0,  20000.0,
+         0.0,      0.0,   3000.0,
 ], dtype=float)
-# For 0.1s
+
 R_DIAG  = np.array([0.001, 0.25, 0.25], dtype=float)
 RD_DIAG = np.array([0.0001, 0.025, 0.025], dtype=float)
-'''
-# for 0.01s
-# MPC config (use tuned values)
-N_MPC   = 50   # 30 for 0.1s, 50 for 0.01s
-NC_MPC  = 10   # 25 for 0.1s, 10 for 0.01s
+R_YAW   = 0.25
+RD_YAW  = 0.025
 
-Q_DIAG = np.array([
-    250000.0, 250000.0, 250000.0,
-        50.0,     50.0,     50.0,
-         0.0,      0.0,
-         0.0,      0.0,
-], dtype=float)
+USE_PID_NOMINAL = True
 
-R_DIAG  = np.array([0.01, 0.05, 0.05], dtype=float)
-RD_DIAG = np.array([0.001, 0.005, 0.005], dtype=float)
-
-DU_MIN = np.array([-5.0, -3.5, -3.5], dtype=float)
-DU_MAX = np.array([ 5.0,  3.5,  3.5], dtype=float)
+# With USE_PID_NOMINAL, these are corrections around the cascaded PID command
+# in standardized input units. Keeping them small holds EDMD-MPC near the
+# behavior distribution it was trained on.
+DU_MIN = np.array([-0.5, -0.05, -0.05], dtype=float)
+DU_MAX = np.array([ 0.5,  0.05,  0.05], dtype=float)
+DU_YAW = 0.05
 
 
 # Linear hover model
@@ -83,8 +79,8 @@ def build_linear_hover_model(sim, dt):
     """
     Build a discrete-time linear hover model for the attitude-commanded plant.
 
-    The model uses the reduced 10-state representation
-    [x, y, z, vx, vy, vz, phi, theta, p, q] with control input
+    The model uses the full 12-state representation
+    [x, y, z, vx, vy, vz, phi, theta, psi, p, q, r] with control input
     [thrust, phi_des, theta_des]. The inner attitude loop is approximated
     as PD control about hover, and the continuous model is discretized
     with a matrix exponential.
@@ -93,6 +89,8 @@ def build_linear_hover_model(sim, dt):
     g = sim.g
     Ixx = sim.Ixx
     Iyy = sim.Iyy
+    Izz = sim.Izz
+    k_drag_angular = sim.k_drag_angular
 
     # Inner-loop PD gains used for hover linearization.
     Kp_phi = sim.kp_ang[0]
@@ -100,7 +98,7 @@ def build_linear_hover_model(sim, dt):
     Kp_theta = sim.kp_ang[1]
     Kd_theta = sim.kd_ang[1]
 
-    nx, nu = 10, 3
+    nx, nu = 12, 3
 
     # Continuous-time state matrix.
     Ac = np.zeros((nx, nx))
@@ -109,18 +107,20 @@ def build_linear_hover_model(sim, dt):
     Ac[2, 5] = 1.0
     Ac[3, 7] = g
     Ac[4, 6] = -g
-    Ac[6, 8] = 1.0
-    Ac[7, 9] = 1.0
-    Ac[8, 6] = -Kp_phi / Ixx
-    Ac[8, 8] = -Kd_phi / Ixx
-    Ac[9, 7] = -Kp_theta / Iyy
-    Ac[9, 9] = -Kd_theta / Iyy
+    Ac[6, 9] = 1.0
+    Ac[7, 10] = 1.0
+    Ac[8, 11] = 1.0
+    Ac[9, 6] = -Kp_phi / Ixx
+    Ac[9, 9] = -Kd_phi / Ixx
+    Ac[10, 7] = -Kp_theta / Iyy
+    Ac[10, 10] = -Kd_theta / Iyy
+    Ac[11, 11] = -k_drag_angular / Izz
 
     # Continuous-time input matrix.
     Bc = np.zeros((nx, nu))
     Bc[5, 0] = 1.0 / m
-    Bc[8, 1] = Kp_phi / Ixx
-    Bc[9, 2] = Kp_theta / Iyy
+    Bc[9, 1] = Kp_phi / Ixx
+    Bc[10, 2] = Kp_theta / Iyy
 
     # Discretize with a matrix exponential.
     M = np.zeros((nx + nu, nx + nu))
@@ -143,28 +143,39 @@ def build_linear_hover_model(sim, dt):
 # Closed-loop rollout
 def run_mpc_closedloop(mpc, sim, X_init, ref_traj, scaler, dt, horizon, n_steps):
     """Run closed-loop tracking with the EDMDc-based MPC controller."""
-    ref_std = precompute_ref_std(ref_traj[:n_steps], scaler, n_states=10)
+    ref_std = precompute_ref_std(ref_traj[:n_steps], scaler, dt=dt)
+    sim.controller_PID.fct_reset()
+    nominal_sim = quad_sim() if USE_PID_NOMINAL else None
 
-    X_mpc = np.zeros((n_steps, 10))
-    U_mpc = np.zeros((n_steps, 3))
+    X_mpc = np.zeros((n_steps, 12))
+    U_mpc = np.zeros((n_steps, mpc.nu))
 
-    # Initialize the plant state from the first logged 10-state sample.
-    x_current_12 = np.zeros(12)
-    x10_init = X_init[0]
-    x_current_12[0:6]  = x10_init[0:6]
-    x_current_12[6:8]  = x10_init[6:8]
-    x_current_12[9:11] = x10_init[8:10]
+    x_current_12 = drop_to_12state(X_init[0])
 
-    X_mpc[0] = drop_to_10state(x_current_12)
+    X_mpc[0] = drop_to_12state(x_current_12)
     solve_times = []
 
     for k in range(n_steps - 1):
-        x10 = drop_to_10state(x_current_12)
-        z_k = lifted_state_from_x(x10, scaler)
+        x12 = drop_to_12state(x_current_12)
+        z_k = lifted_state_from_x(x12, scaler)
         x_ref_h = build_ref_horizon(ref_std, k, horizon)
+        u_nom = np.zeros(mpc.nu, dtype=float)
+        if USE_PID_NOMINAL:
+            _, _, u_att_nom = nominal_sim.controller_PID.fct_step(
+                x_current_12, ref_traj[k], dt
+            )
+            u_nom[:3] = u_att_nom[:3]
+            if mpc.nu > 3:
+                u_nom[3] = u_att_nom[3]
+        else:
+            u_nom[:3] = [sim.q_mass * sim.g, 0.0, 0.0]
+            if mpc.nu > 3:
+                u_nom[3] = sim.controller_PID.fct_desired_yaw(
+                    ref_traj[k], x_current_12[8]
+                )
 
         t0 = time.perf_counter()
-        u_cmd = mpc.compute(z_k, x_ref_h)
+        u_cmd = mpc.compute(z_k, x_ref_h, u_nominal_raw=u_nom)
         solve_times.append(time.perf_counter() - t0)
 
         u_cmd[0] = np.clip(u_cmd[0], 0.5 * sim.q_mass * sim.g, 2.0 * sim.q_mass * sim.g)
@@ -172,46 +183,66 @@ def run_mpc_closedloop(mpc, sim, X_init, ref_traj, scaler, dt, horizon, n_steps)
         u_cmd[2] = np.clip(u_cmd[2], -sim.controller_PID.tilt_max, sim.controller_PID.tilt_max)
 
         U_mpc[k] = u_cmd
+        if mpc.nu > 3:
+            psi_des = u_cmd[3]
+        else:
+            psi_des = sim.controller_PID.fct_desired_yaw(
+                ref_traj[k], x_current_12[8]
+            )
 
         x_next_12 = sim.sim_PID.fct_step_attitude(
             x_current_12,
             u1=u_cmd[0],
             phi_des=u_cmd[1],
             theta_des=u_cmd[2],
-            dt=dt
+            dt=dt,
+            psi_des=psi_des,
         )
         x_current_12 = x_next_12
-        X_mpc[k + 1] = drop_to_10state(x_next_12)
+        X_mpc[k + 1] = drop_to_12state(x_next_12)
 
     U_mpc[-1] = U_mpc[-2]
+    sim.controller_PID.fct_reset()
+    if nominal_sim is not None:
+        nominal_sim.controller_PID.fct_reset()
     return X_mpc, U_mpc, solve_times
 
 def run_linear_mpc_closedloop(mpc, sim, X_init, ref_traj, scaler, dt, horizon, n_steps):
     """Run closed-loop tracking with the linear MPC controller."""
-    ref_std = precompute_ref_std(ref_traj[:n_steps], scaler, n_states=10)
+    ref_std = precompute_ref_std(ref_traj[:n_steps], scaler, dt=dt)
+    sim.controller_PID.fct_reset()
+    nominal_sim = quad_sim() if USE_PID_NOMINAL else None
 
-    X_mpc = np.zeros((n_steps, 10))
+    X_mpc = np.zeros((n_steps, 12))
     U_mpc = np.zeros((n_steps, 3))
 
-    x_current_12 = np.zeros(12)
-    x10_init = X_init[0]
-    x_current_12[0:6]  = x10_init[0:6]
-    x_current_12[6:8]  = x10_init[6:8]
-    x_current_12[9:11] = x10_init[8:10]
+    x_current_12 = drop_to_12state(X_init[0])
 
-    X_mpc[0] = drop_to_10state(x_current_12)
+    X_mpc[0] = drop_to_12state(x_current_12)
     solve_times = []
+    u_prev = np.array([sim.q_mass * sim.g, 0.0, 0.0], dtype=float)
 
     for k in range(n_steps - 1):
-        x10 = drop_to_10state(x_current_12)
+        x12 = drop_to_12state(x_current_12)
 
         # Linear MPC uses the standardized physical state directly.
-        z_k = scaler.transform(x10.reshape(1, -1)).flatten()
+        z_k = scaler.transform(x12.reshape(1, -1)).flatten()
 
         x_ref_h = build_ref_horizon(ref_std, k, horizon)
 
         t0 = time.perf_counter()
-        u_cmd = mpc.compute(z_k, x_ref_h)
+        if USE_PID_NOMINAL:
+            _, _, u_att_nom = nominal_sim.controller_PID.fct_step(
+                x_current_12, ref_traj[k], dt
+            )
+            u_nom = u_att_nom[:3].copy()
+            psi_des = u_att_nom[3]
+        else:
+            u_nom = np.array([sim.q_mass * sim.g, 0.0, 0.0], dtype=float)
+            psi_des = sim.controller_PID.fct_desired_yaw(
+                ref_traj[k], x_current_12[8]
+            )
+        u_cmd = mpc.compute(z_k, x_ref_h, u_nominal_raw=u_nom)
         solve_times.append(time.perf_counter() - t0)
 
         u_cmd[0] = np.clip(u_cmd[0], 0.5 * sim.q_mass * sim.g,
@@ -226,13 +257,17 @@ def run_linear_mpc_closedloop(mpc, sim, X_init, ref_traj, scaler, dt, horizon, n
         x_next_12 = sim.sim_PID.fct_step_attitude(
             x_current_12,
             u1=u_cmd[0], phi_des=u_cmd[1], theta_des=u_cmd[2],
-            dt=dt
+            dt=dt,
+            psi_des=psi_des,
         )
         x_current_12 = x_next_12
-        X_mpc[k + 1] = drop_to_10state(x_next_12)
+        X_mpc[k + 1] = drop_to_12state(x_next_12)
 
     U_mpc[-1] = U_mpc[-2]
 
+    sim.controller_PID.fct_reset()
+    if nominal_sim is not None:
+        nominal_sim.controller_PID.fct_reset()
     return X_mpc, U_mpc, solve_times
 
 
@@ -260,6 +295,34 @@ def scale_linear_model(Ad, Bd, state_scaler, u_scaler):
 
     return A_s, B_s, c_s
 
+
+class InputScalerView:
+    def __init__(self, scaler, n_inputs):
+        self.mean_ = np.asarray(scaler.mean_[:n_inputs], dtype=float)
+        self.scale_ = np.asarray(scaler.scale_[:n_inputs], dtype=float)
+        self.n_features_in_ = int(n_inputs)
+
+    def transform(self, values):
+        values = np.asarray(values, dtype=float)
+        return (values - self.mean_) / self.scale_
+
+    def inverse_transform(self, values):
+        values = np.asarray(values, dtype=float)
+        return values * self.scale_ + self.mean_
+
+
+def set_axes_equal_3d(ax, xyz):
+    xyz = np.asarray(xyz, dtype=float)
+    mins = np.min(xyz, axis=0)
+    maxs = np.max(xyz, axis=0)
+    centers = 0.5 * (mins + maxs)
+    radius = 0.55 * max(np.max(maxs - mins), 1.0)
+
+    ax.set_xlim(centers[0] - radius, centers[0] + radius)
+    ax.set_ylim(centers[1] - radius, centers[1] + radius)
+    ax.set_zlim(centers[2] - radius, centers[2] + radius)
+
+
 # PID baseline at the controller update rate
 def run_pid_at_dt(sim, ref_traj, X_true, dt_mpc, n_steps):
     """
@@ -267,15 +330,11 @@ def run_pid_at_dt(sim, ref_traj, X_true, dt_mpc, n_steps):
     the original sim dt (0.01s). This is fair: PID gets the same
     control update rate as MPC.
     """
-    X_pid = np.zeros((n_steps, 10))
+    X_pid = np.zeros((n_steps, 12))
 
-    x_current_12 = np.zeros(12)
-    x10_init = X_true[0]
-    x_current_12[0:6]  = x10_init[0:6]
-    x_current_12[6:8]  = x10_init[6:8]
-    x_current_12[9:11] = x10_init[8:10]
+    x_current_12 = drop_to_12state(X_true[0])
 
-    X_pid[0] = drop_to_10state(x_current_12)
+    X_pid[0] = drop_to_12state(x_current_12)
 
     sim.controller_PID.fct_reset()
 
@@ -295,11 +354,23 @@ def run_pid_at_dt(sim, ref_traj, X_true, dt_mpc, n_steps):
         sol = solve_ivp(ode, [0, dt_mpc], x_current_12, method="RK45")
         x_current_12 = sol.y[:, -1]
 
-        X_pid[k + 1] = drop_to_10state(x_current_12)
+        X_pid[k + 1] = drop_to_12state(x_current_12)
 
     sim.controller_PID.fct_reset()
 
     return X_pid
+
+
+def tracking_detail(X, ref_traj, ref_xyz, dt):
+    ref_vel = np.array([wp["vel"][:3] for wp in ref_traj], dtype=float)
+    ref_yaw, ref_r = reference_yaw_arrays(ref_traj, dt=dt)
+    yaw_err = wrap_angle_pi(X[:, 8] - ref_yaw)
+    return {
+        "y": rmse(X[:, 1], ref_xyz[:, 1]),
+        "vy": rmse(X[:, 4], ref_vel[:, 1]),
+        "yaw": float(np.sqrt(np.mean(yaw_err**2))),
+        "r": rmse(X[:, 11], ref_r),
+    }
 
 
 
@@ -321,8 +392,6 @@ def main():
     t_all, states_all, U_all, ref_traj_list = load_simulation_runs(
         SCRIPT_DIR / DATA_FILE)
 
-    if states_all.shape[2] == 12:
-        states_all = states_all[:, :, [0,1,2,3,4,5,6,7,9,10]]
     if U_all.shape[2] == 4:
         U_all = U_all[:, :, :3]
 
@@ -335,44 +404,59 @@ def main():
     ref_traj_list = [r[::step] for r in ref_traj_list]
 
     sim = quad_sim()
-    u_nominal = np.array([sim.q_mass * sim.g, 0.0, 0.0], dtype=float)
+    input_dim_edmd = B_edmd.shape[1]
+    if input_dim_edmd not in (3, 4):
+        raise ValueError(f"Expected EDMD input dimension 3 or 4, got {input_dim_edmd}")
+
+    u_nominal_edmd = np.zeros(input_dim_edmd, dtype=float)
+    u_nominal_edmd[:3] = [sim.q_mass * sim.g, 0.0, 0.0]
+    u_scaler_linear = u_scaler if input_dim_edmd == 3 else InputScalerView(u_scaler, 3)
+    u_nominal_linear = np.array([sim.q_mass * sim.g, 0.0, 0.0], dtype=float)
 
     # --- Build linear model ---
     Ad_phys, Bd_phys = build_linear_hover_model(sim, dt)
 
     # Scale to standardized space
-    A_lin_s, B_lin_s, c_lin_s = scale_linear_model(Ad_phys, Bd_phys, scaler, u_scaler)
+    A_lin_s, B_lin_s, c_lin_s = scale_linear_model(Ad_phys, Bd_phys, scaler, u_scaler_linear)
 
     print(f"\nLinear model (scaled): A={A_lin_s.shape} B={B_lin_s.shape}")
     print(f"Affine offset norm: {np.linalg.norm(c_lin_s):.6f}")
 
     # --- Build EDMDc MPC ---
-    Q  = np.diag(Q_DIAG)
-    R  = np.diag(R_DIAG)
-    Rd = np.diag(RD_DIAG)
+    Q = np.diag(Q_DIAG)
+    if input_dim_edmd == 4:
+        R_edmd = np.diag(np.r_[R_DIAG, R_YAW])
+        Rd_edmd = np.diag(np.r_[RD_DIAG, RD_YAW])
+        du_min_edmd = np.r_[DU_MIN, -DU_YAW]
+        du_max_edmd = np.r_[DU_MAX,  DU_YAW]
+    else:
+        R_edmd = np.diag(R_DIAG)
+        Rd_edmd = np.diag(RD_DIAG)
+        du_min_edmd = DU_MIN
+        du_max_edmd = DU_MAX
 
-    Cz_edmd = np.zeros((10, n_obs))
-    Cz_edmd[:10, :10] = np.eye(10)
+    Cz_edmd = np.zeros((12, n_obs))
+    Cz_edmd[:12, :12] = np.eye(12)
 
     mpc_edmd = EDMDcMPC_QP(
         A=A_edmd, B=B_edmd, Cz=Cz_edmd,
         N=N_MPC, NC=NC_MPC,
-        Q=Q, R=R, Rd=Rd,
+        Q=Q, R=R_edmd, Rd=Rd_edmd,
         u_scaler=u_scaler,
-        du_min=DU_MIN, du_max=DU_MAX,
-        u_nominal_raw=u_nominal,
+        du_min=du_min_edmd, du_max=du_max_edmd,
+        u_nominal_raw=u_nominal_edmd,
     )
 
     # --- Build Linear MPC (same QP structure, linear A/B, Cz=I) ---
-    Cz_lin = np.eye(10)
+    Cz_lin = np.eye(12)
 
     mpc_linear = EDMDcMPC_QP(
         A=A_lin_s, B=B_lin_s, Cz=Cz_lin,
         N=N_MPC, NC=NC_MPC,
-        Q=Q, R=R, Rd=Rd,
-        u_scaler=u_scaler,
+        Q=Q, R=np.diag(R_DIAG), Rd=np.diag(RD_DIAG),
+        u_scaler=u_scaler_linear,
         du_min=DU_MIN, du_max=DU_MAX,
-        u_nominal_raw=u_nominal,
+        u_nominal_raw=u_nominal_linear,
     )
 
     # ============================================================
@@ -392,9 +476,12 @@ def main():
         ref_traj = ref_traj_list[ri]
         ref_xyz = extract_ref_xyz(ref_traj)
         T = min(len(t_ref), X_true.shape[0], ref_xyz.shape[0])
+        if MAX_STEPS is not None:
+            T = min(T, MAX_STEPS)
         t_ref   = t_ref[:T]
         X_true  = X_true[:T]
         ref_xyz = ref_xyz[:T]
+        ref_traj = ref_traj[:T]
 
         pid_rmse = rmse(X_true[:, 0:3], ref_xyz)
 
@@ -412,6 +499,7 @@ def main():
         )
         edmd_rmse = rmse(X_edmd[:, 0:3], ref_xyz)
         edmd_time = 1e3 * np.mean(st_edmd)
+        edmd_detail = tracking_detail(X_edmd, ref_traj, ref_xyz, dt)
 
         # Linear MPC
         X_lin, U_lin, st_lin = run_linear_mpc_closedloop(
@@ -419,6 +507,7 @@ def main():
         )
         lin_rmse = rmse(X_lin[:, 0:3], ref_xyz)
         lin_time = 1e3 * np.mean(st_lin)
+        lin_detail = tracking_detail(X_lin, ref_traj, ref_xyz, dt)
 
         # Winner
         best = min(pid_slow_rmse, edmd_rmse, lin_rmse)
@@ -426,7 +515,11 @@ def main():
 
         print(f"  PID:    {pid_rmse:.4f} m")
         print(f"  EDMDc:  {edmd_rmse:.4f} m  ({edmd_time:.2f} ms/step)")
+        print(f"          y={edmd_detail['y']:.4f}m  vy={edmd_detail['vy']:.4f}m/s  "
+              f"yaw={edmd_detail['yaw']:.4f}rad  r={edmd_detail['r']:.4f}rad/s")
         print(f"  Linear: {lin_rmse:.4f} m  ({lin_time:.2f} ms/step)")
+        print(f"          y={lin_detail['y']:.4f}m  vy={lin_detail['vy']:.4f}m/s  "
+              f"yaw={lin_detail['yaw']:.4f}rad  r={lin_detail['r']:.4f}rad/s")
         print(f"  Winner: {winner}")
 
         all_results.append({
@@ -439,6 +532,7 @@ def main():
             "edmdc_time": edmd_time,
             "linear_time": lin_time,
             "t_ref": t_ref,
+            "ref_traj": ref_traj,
             "ref_xyz": ref_xyz,
             "X_true": X_true,
             "X_pid":X_pid_slow,
@@ -540,9 +634,19 @@ def main():
         ax.set_xlabel("x [m]", fontsize=9)
         ax.set_ylabel("y [m]", fontsize=9)
         ax.set_zlabel("z [m]", fontsize=9)
+        xyz_plot = np.vstack([
+            ref[:, 0:3],
+            r["X_pid"][:, 0:3],
+            r["X_edmd"][:, 0:3],
+            r["X_lin"][:, 0:3],
+        ])
+        set_axes_equal_3d(ax, xyz_plot)
         ax.legend(fontsize=7, loc="upper left")
+    for ax in axes_3d.flat[len(all_results):]:
+        ax.set_axis_off()
     fig_3d.suptitle("3D Trajectory Comparison", fontsize=15, fontweight="bold")
     plt.tight_layout()
+    print("Generated 3D Trajectory Comparison plot.")
 
     # ---------------------------------------------------------------
     # PLOT 3: Per-axis X, Y, Z over time for each trajectory
@@ -598,19 +702,53 @@ def main():
     plt.tight_layout()
 
     # ---------------------------------------------------------------
-    # PLOT 5: Control inputs for figure-8 case
+    # PLOT 5: Weak-state diagnostics for figure-8 case
     # ---------------------------------------------------------------
     fig8_idx = next(i for i, r in enumerate(all_results) if "figure" in r["name"])
     r = all_results[fig8_idx]
+    ref_vel = np.array([wp["vel"][:3] for wp in r["ref_traj"]], dtype=float)
+    ref_yaw, ref_rate = reference_yaw_arrays(r["ref_traj"], dt=dt)
+
+    def yaw_on_ref_branch(X):
+        return ref_yaw + wrap_angle_pi(X[:, 8] - ref_yaw)
+
+    diag_specs = [
+        ("y [m]", r["ref_xyz"][:, 1], r["X_pid"][:, 1], r["X_edmd"][:, 1], r["X_lin"][:, 1]),
+        ("vy [m/s]", ref_vel[:, 1], r["X_pid"][:, 4], r["X_edmd"][:, 4], r["X_lin"][:, 4]),
+        (r"$\psi$ [rad]", ref_yaw, yaw_on_ref_branch(r["X_pid"]),
+         yaw_on_ref_branch(r["X_edmd"]), yaw_on_ref_branch(r["X_lin"])),
+        ("r [rad/s]", ref_rate, r["X_pid"][:, 11], r["X_edmd"][:, 11], r["X_lin"][:, 11]),
+    ]
+
+    fig_diag, axes_diag = plt.subplots(4, 1, figsize=(14, 10), sharex=True)
+    for ax, (label, ref_sig, pid_sig, edmd_sig, lin_sig) in zip(axes_diag, diag_specs):
+        ax.plot(thin(r["t_ref"]), thin(ref_sig), C_REF, lw=2.3, label="Reference")
+        ax.plot(thin(r["t_ref"]), thin(pid_sig), color=C_PID, lw=1.1, alpha=0.65, label="PID")
+        ax.plot(thin(r["t_ref"]), thin(edmd_sig), color=C_EDMDC, lw=1.3, label="EDMDc MPC")
+        ax.plot(thin(r["t_ref"]), thin(lin_sig), color=C_LIN, lw=1.1, ls="--", label="Linear MPC")
+        ax.set_ylabel(label, fontsize=11)
+        ax.grid(True, alpha=0.3)
+    axes_diag[0].legend(fontsize=9, ncol=4, loc="upper right")
+    axes_diag[-1].set_xlabel("Time [s]", fontsize=11)
+    fig_diag.suptitle(f"Weak-State Diagnostics - {r['name']}", fontsize=14, fontweight="bold")
+    plt.tight_layout()
+
+    # ---------------------------------------------------------------
+    # PLOT 6: Control inputs for figure-8 case
+    # ---------------------------------------------------------------
     u_labels = ["Thrust [N]", r"$\phi_{des}$ [rad]", r"$\theta_{des}$ [rad]"]
-    fig_u, axes_u = plt.subplots(3, 1, figsize=(14, 8), sharex=True)
-    for j in range(3):
+    if r["U_edmd"].shape[1] > 3:
+        u_labels.append(r"$\psi_{des}$ [rad]")
+    fig_u, axes_u = plt.subplots(len(u_labels), 1, figsize=(14, 9), sharex=True)
+    axes_u = np.atleast_1d(axes_u)
+    for j, label in enumerate(u_labels):
         ax = axes_u[j]
         ax.plot(thin(r["t_ref"]), thin(r["U_edmd"][:, j]),
                 color=C_EDMDC, lw=1.2, label="EDMDc MPC")
-        ax.plot(thin(r["t_ref"]), thin(r["U_lin"][:, j]),
-                color=C_LIN, lw=1, ls="--", label="Linear MPC")
-        ax.set_ylabel(u_labels[j], fontsize=11)
+        if j < r["U_lin"].shape[1]:
+            ax.plot(thin(r["t_ref"]), thin(r["U_lin"][:, j]),
+                    color=C_LIN, lw=1, ls="--", label="Linear MPC")
+        ax.set_ylabel(label, fontsize=11)
         ax.grid(True, alpha=0.3)
         if j == 0:
             ax.legend(fontsize=10)
@@ -619,7 +757,7 @@ def main():
     plt.tight_layout()
 
     # ---------------------------------------------------------------
-    # PLOT 6: Solve time comparison
+    # PLOT 7: Solve time comparison
     # ---------------------------------------------------------------
     fig_st, ax_st = plt.subplots(figsize=(8, 4))
     names  = [r["name"] for r in all_results]

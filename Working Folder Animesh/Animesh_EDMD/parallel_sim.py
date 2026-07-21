@@ -34,14 +34,13 @@ def run_prbs_single(i):
     delta_thrust = 1.0
     delta_phi    = 0.7
     delta_theta  = 0.7
-    delta_psi    = 0.3
 
     u_att_seq   = np.zeros((T, 3))
     switch_steps = rng.randint(2, 20)
     thrust_cmd = thrust_nom
     phi_cmd    = 0.0
     theta_cmd  = 0.0
-    psi_cmd    = float(np.clip(rng.uniform(-delta_psi, delta_psi), -sim.controller_PID.yaw_tau_max, sim.controller_PID.yaw_tau_max))
+
     for k in range(T):
         if k % switch_steps == 0:
             switch_steps = rng.randint(2, 20)
@@ -52,9 +51,7 @@ def run_prbs_single(i):
                               -sim.controller_PID.tilt_max, sim.controller_PID.tilt_max))
             theta_cmd = float(np.clip(rng.uniform(-delta_theta, delta_theta),
                               -sim.controller_PID.tilt_max, sim.controller_PID.tilt_max))
-            psi_cmd   = float(np.clip(rng.uniform(-delta_psi,   delta_psi),
-                              -sim.controller_PID.yaw_tau_max, sim.controller_PID.yaw_tau_max))
-        u_att_seq[k] = [thrust_cmd, phi_cmd, theta_cmd, psi_cmd]
+        u_att_seq[k] = [thrust_cmd, phi_cmd, theta_cmd]
 
     state      = np.zeros(12)
     state[2]   = 1.0   # start at 1m altitude
@@ -85,7 +82,7 @@ def run_prbs_single(i):
         state = sol.y[:, -1]
 
         states_i[k]  = state
-        u_att_log[k] = [u1, phi_des, theta_des, psi_des]
+        u_att_log[k] = [u1, phi_des, theta_des,0]
 
     sim.controller_PID.pid_phi.fct_reset()
     sim.controller_PID.pid_theta.fct_reset()

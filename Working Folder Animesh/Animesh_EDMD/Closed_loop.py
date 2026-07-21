@@ -27,32 +27,40 @@ class ClosedLoopQuad:
             sol = solve_ivp(ode, [t, t + dt], state, method="RK45")
             state = sol.y[:, -1]
 
+
         self.controller.fct_reset()
         return time, states, omegas, control_inputs, u_att_log
 
-    def fct_step_attitude(self, state, u1, phi_des, theta_des, psi_des, dt):
+    def fct_step_attitude(self, state, u1, phi_des, theta_des, dt, psi_des=0.0, inner_dt=0.01):
         """
         Advance the plant by one step using direct attitude commands.
-        Runs the inner attitude PID for roll, pitch, and yaw.
         """
-        phi, theta, psi = state[6], state[7], state[8]
 
-        u2 = self.controller.pid_phi.fct_control(phi, phi_des, dt)
-        u3 = self.controller.pid_theta.fct_control(theta, theta_des, dt)
-        u4 = self.controller.pid_psi.fct_control(psi, psi_des, dt)
+        state_current = np.array(state, dtype=float)
+        n_substeps = max(1, int(np.ceil(float(dt) / float(inner_dt))))
+        h = float(dt) / n_substeps
 
-        u2 = float(np.clip(u2, -self.controller.torque_max, self.controller.torque_max))
-        u3 = float(np.clip(u3, -self.controller.torque_max, self.controller.torque_max))
-        u4 = float(np.clip(u4, -self.controller.yaw_tau_max, self.controller.yaw_tau_max))
+        for _ in range(n_substeps):
+            phi, theta, psi = state_current[6], state_current[7], state_current[8]
 
-        u = [u1, u2, u3, u4]
-        omega_cmd = pid_mixer.fct_mixer(
-            u, self.quad.kT, self.quad.kD, self.quad.l,
-            min_omega=0.0, max_omega=self.controller.max_speed
-        )
+            # Inner-loop attitude control runs at the plant integration rate while
+            # the outer MPC attitude command is held over the full MPC interval.
+            u2 = self.controller.pid_phi.fct_control(phi, phi_des, h)
+            u3 = self.controller.pid_theta.fct_control(theta, theta_des, h)
+            u4 = self.controller.fct_yaw_torque(psi, psi_des, h)
+            u2 = float(np.clip(u2, -self.controller.torque_max, self.controller.torque_max))
+            u3 = float(np.clip(u3, -self.controller.torque_max, self.controller.torque_max))
 
-        def ode(t_local, s_local):
-            return self.quad.fct_dynamics(t_local, s_local, omega_cmd)
+            u = [u1, u2, u3, u4]
+            omega_cmd = pid_mixer.fct_mixer(
+                u, self.quad.kT, self.quad.kD, self.quad.l,
+                min_omega=0.0, max_omega=self.controller.max_speed
+            )
 
-        sol = solve_ivp(ode, [0, dt], state, method="RK45")
-        return sol.y[:, -1]
+            def ode(t_local, s_local):
+                return self.quad.fct_dynamics(t_local, s_local, omega_cmd)
+
+            sol = solve_ivp(ode, [0, h], state_current, method="RK45")
+            state_current = sol.y[:, -1]
+
+        return state_current

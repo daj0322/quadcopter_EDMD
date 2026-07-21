@@ -25,7 +25,7 @@ from edmdc_mpc import (
     load_edmdc_model,
     load_simulation_runs,
     lifted_state_from_x,
-    drop_to_10state,
+    drop_to_12state,
     precompute_ref_std,
     build_ref_horizon,
     rmse,
@@ -48,8 +48,8 @@ NC_MPC  = 20
 Q_DIAG = np.array([
     300000.0, 300000.0, 300000.0,
         300.0,     300.0,     300.0,
-         0.0,      0.0,
-         0.0,      0.0,
+         0.0,      0.0,      0.0,
+         0.0,      0.0,      0.0,
 ], dtype=float)
 
 R_DIAG  = np.array([0.02, 0.08, 0.08], dtype=float)
@@ -227,10 +227,11 @@ def build_target_ref_traj(target, t_now, dt, N):
         t_future = t_now + i * dt
         pos = target.position(t_future)
         vel = target.velocity(t_future)
+        yaw = np.arctan2(vel[1], vel[0]) if np.linalg.norm(vel[:2]) > 1e-6 else 0.0
         ref.append({
             "pos": pos,
             "vel": vel,
-            "yaw": 0.0,
+            "yaw": float(yaw),
         })
     return ref
 
@@ -239,10 +240,11 @@ def build_target_ref_pid(target, t_now):
     """Build a single-step reference dict for PID."""
     pos = target.position(t_now)
     vel = target.velocity(t_now)
+    yaw = np.arctan2(vel[1], vel[0]) if np.linalg.norm(vel[:2]) > 1e-6 else 0.0
     return {
         "pos": pos,
         "vel": vel,
-        "yaw": 0.0,
+        "yaw": float(yaw),
     }
 
 
@@ -251,20 +253,22 @@ def build_target_ref_pid(target, t_now):
 # ============================================================
 def build_linear_hover_model(sim, dt):
     m, g = sim.q_mass, sim.g
-    Ixx, Iyy = sim.Ixx, sim.Iyy
+    Ixx, Iyy, Izz = sim.Ixx, sim.Iyy, sim.Izz
+    k_drag_angular = sim.k_drag_angular
     Kp_phi, Kd_phi = sim.kp_ang[0], sim.kd_ang[0]
     Kp_theta, Kd_theta = sim.kp_ang[1], sim.kd_ang[1]
 
-    nx, nu = 10, 3
+    nx, nu = 12, 3
     Ac = np.zeros((nx, nx))
     Ac[0,3] = 1; Ac[1,4] = 1; Ac[2,5] = 1
     Ac[3,7] = g; Ac[4,6] = -g
-    Ac[6,8] = 1; Ac[7,9] = 1
-    Ac[8,6] = -Kp_phi/Ixx;   Ac[8,8] = -Kd_phi/Ixx
-    Ac[9,7] = -Kp_theta/Iyy; Ac[9,9] = -Kd_theta/Iyy
+    Ac[6,9] = 1; Ac[7,10] = 1; Ac[8,11] = 1
+    Ac[9,6] = -Kp_phi/Ixx;    Ac[9,9] = -Kd_phi/Ixx
+    Ac[10,7] = -Kp_theta/Iyy; Ac[10,10] = -Kd_theta/Iyy
+    Ac[11,11] = -k_drag_angular/Izz
 
     Bc = np.zeros((nx, nu))
-    Bc[5,0] = 1/m; Bc[8,1] = Kp_phi/Ixx; Bc[9,2] = Kp_theta/Iyy
+    Bc[5,0] = 1/m; Bc[9,1] = Kp_phi/Ixx; Bc[10,2] = Kp_theta/Iyy
 
     M = np.zeros((nx+nu, nx+nu))
     M[:nx,:nx] = Ac*dt; M[:nx,nx:] = Bc*dt
@@ -287,10 +291,10 @@ def scale_linear_model(Ad, Bd, scaler, u_scaler):
 def run_pid_intercept(sim, target, x0_12, dt, t_max, capture_radius):
     """PID reactively chases target's current position."""
     n_max = int(t_max / dt)
-    X = np.zeros((n_max, 10))
+    X = np.zeros((n_max, 12))
     U = np.zeros((n_max, 3))
     x12 = x0_12.copy()
-    X[0] = drop_to_10state(x12)
+    X[0] = drop_to_12state(x12)
 
     sim.controller_PID.fct_reset()
     capture_step = n_max - 1
@@ -311,7 +315,7 @@ def run_pid_intercept(sim, target, x0_12, dt, t_max, capture_radius):
             return sim.quad.fct_dynamics(t_local, s_local, omega_cmd)
         sol = solve_ivp(ode, [0, dt], x12, method="RK45")
         x12 = sol.y[:, -1]
-        X[k+1] = drop_to_10state(x12)
+        X[k+1] = drop_to_12state(x12)
 
         # Check capture
         dist = np.linalg.norm(X[k+1, 0:3] - target.position(t_now + dt))
@@ -328,22 +332,22 @@ def run_edmdc_mpc_intercept(mpc, sim, scaler, target, x0_12, dt, N,
                             t_max, capture_radius):
     """EDMDc MPC tracks predicted target trajectory."""
     n_max = int(t_max / dt)
-    X = np.zeros((n_max, 10))
+    X = np.zeros((n_max, 12))
     U = np.zeros((n_max, 3))
     x12 = x0_12.copy()
-    X[0] = drop_to_10state(x12)
+    X[0] = drop_to_12state(x12)
 
     capture_step = n_max - 1
     solve_times = []
 
     for k in range(n_max - 1):
         t_now = k * dt
-        x10 = drop_to_10state(x12)
-        z_k = lifted_state_from_x(x10, scaler)
+        x_state = drop_to_12state(x12)
+        z_k = lifted_state_from_x(x_state, scaler)
 
         # Build predicted target reference over MPC horizon
         ref_traj_k = build_target_ref_traj(target, t_now, dt, N)
-        ref_std = precompute_ref_std(ref_traj_k, scaler, n_states=10)
+        ref_std = precompute_ref_std(ref_traj_k, scaler)
         x_ref_h = ref_std[:N]
 
         t0 = time.perf_counter()
@@ -356,8 +360,9 @@ def run_edmdc_mpc_intercept(mpc, sim, scaler, target, x0_12, dt, N,
         U[k] = u_cmd
 
         x12 = sim.sim_PID.fct_step_attitude(
-            x12, u1=u_cmd[0], phi_des=u_cmd[1], theta_des=u_cmd[2], dt=dt)
-        X[k+1] = drop_to_10state(x12)
+            x12, u1=u_cmd[0], phi_des=u_cmd[1], theta_des=u_cmd[2], dt=dt,
+            psi_des=ref_traj_k[0].get("yaw", 0.0))
+        X[k+1] = drop_to_12state(x12)
 
         dist = np.linalg.norm(X[k+1, 0:3] - target.position(t_now + dt))
         if dist <= capture_radius:
@@ -372,21 +377,21 @@ def run_linear_mpc_intercept(mpc, sim, scaler, target, x0_12, dt, N,
                              t_max, capture_radius):
     """Linear MPC tracks predicted target trajectory."""
     n_max = int(t_max / dt)
-    X = np.zeros((n_max, 10))
+    X = np.zeros((n_max, 12))
     U = np.zeros((n_max, 3))
     x12 = x0_12.copy()
-    X[0] = drop_to_10state(x12)
+    X[0] = drop_to_12state(x12)
 
     capture_step = n_max - 1
     solve_times = []
 
     for k in range(n_max - 1):
         t_now = k * dt
-        x10 = drop_to_10state(x12)
-        z_k = scaler.transform(x10.reshape(1, -1)).flatten()
+        x_state = drop_to_12state(x12)
+        z_k = scaler.transform(x_state.reshape(1, -1)).flatten()
 
         ref_traj_k = build_target_ref_traj(target, t_now, dt, N)
-        ref_std = precompute_ref_std(ref_traj_k, scaler, n_states=10)
+        ref_std = precompute_ref_std(ref_traj_k, scaler)
         x_ref_h = ref_std[:N]
 
         t0 = time.perf_counter()
@@ -399,8 +404,9 @@ def run_linear_mpc_intercept(mpc, sim, scaler, target, x0_12, dt, N,
         U[k] = u_cmd
 
         x12 = sim.sim_PID.fct_step_attitude(
-            x12, u1=u_cmd[0], phi_des=u_cmd[1], theta_des=u_cmd[2], dt=dt)
-        X[k+1] = drop_to_10state(x12)
+            x12, u1=u_cmd[0], phi_des=u_cmd[1], theta_des=u_cmd[2], dt=dt,
+            psi_des=ref_traj_k[0].get("yaw", 0.0))
+        X[k+1] = drop_to_12state(x12)
 
         dist = np.linalg.norm(X[k+1, 0:3] - target.position(t_now + dt))
         if dist <= capture_radius:
@@ -509,8 +515,8 @@ def main():
 
     # --- Build controllers ---
     # EDMDc MPC
-    Cz = np.zeros((10, n_obs))
-    Cz[:10, :10] = np.eye(10)
+    Cz = np.zeros((12, n_obs))
+    Cz[:12, :12] = np.eye(12)
 
     mpc_edmd = EDMDcMPC_QP(
         A=A_edmd, B=B_edmd, Cz=Cz,
@@ -526,7 +532,7 @@ def main():
     A_lin, B_lin = scale_linear_model(Ad, Bd, scaler, u_scaler)
 
     mpc_linear = EDMDcMPC_QP(
-        A=A_lin, B=B_lin, Cz=np.eye(10),
+        A=A_lin, B=B_lin, Cz=np.eye(12),
         N=N_MPC, NC=NC_MPC,
         Q=np.diag(Q_DIAG), R=np.diag(R_DIAG), Rd=np.diag(RD_DIAG),
         u_scaler=u_scaler,

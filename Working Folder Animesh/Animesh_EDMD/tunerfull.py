@@ -21,7 +21,7 @@ import numpy as np
 # CONFIG
 # ============================================================
 SCRIPT_DIR       = Path(__file__).resolve().parent
-EDMDC_MODEL_FILE = "edmdc_model_300_0.01.pkl"
+EDMDC_MODEL_FILE = "edmdc_model_300.pkl"
 DATA_FILE        = "runs_mixed_n300.pkl"
 
 TEST_INDICES = [39, 59, 99, 129, 155, 210]
@@ -30,14 +30,22 @@ TEST_LABELS  = ["helix_sm", "fig8", "helix_lg", "lissajous", "waypoint", "hover"
 FAST_STEPS = 300
 TOP_K      = 10
 
-DU_MIN_FIXED = np.array([-5.0, -3.5, -3.5,-0.05], dtype=float)
-DU_MAX_FIXED = np.array([ 5.0,  3.5,  3.5, 0.05], dtype=float)
+DU_MIN_FIXED = np.array([-0.5, -0.05, -0.05], dtype=float)
+DU_MAX_FIXED = np.array([ 0.5,  0.05,  0.05], dtype=float)
+DU_YAW_FIXED = 0.05
+Q_Y_MULT_FIXED = 1.6
+Q_VY_MULT_FIXED = 1.6
+Q_YAW_FIXED = 20000.0
+Q_R_FIXED = 3000.0
+YAW_R_FIXED = 0.25
+YAW_RD_FIXED = 0.025
+SCORE_YAW_WEIGHT = 0.25
+SCORE_R_WEIGHT = 0.03
 
 GRID_COARSE = {
     "Q_pos":    [50000, 100000, 200000, 500000],
     "Q_vel":    [100, 500, 1000, 5000],
     "R_thrust": [0.0001, 0.001, 0.01],
-    "Q_yaw":     [0.0, 1000, 5000, 20000],
     "R_angle":  [0.01, 0.1, 0.5],
     "N":        [20, 30, 50],
     "NC":       [10, 15, 25],
@@ -47,17 +55,16 @@ GRID_COARSE = {
 def make_fine_grid(best):
     def neighbors(val, factors):
         return sorted(set(val * f for f in factors))
-    q_yaw_best = best["Q_yaw"]
-    q_yaw_neighbors = neighbors(q_yaw_best, [0.5, 1.0, 2.0]) if q_yaw_best > 0 else [0.0, 1000.0, 5000.0]
     return {
         "Q_pos":    neighbors(best["Q_pos"], [0.5, 0.75, 1.0, 1.25, 1.5]),
         "Q_vel":    neighbors(best["Q_vel"], [0.25, 0.5, 1.0, 2.0, 4.0]),
-        "Q_yaw":    q_yaw_neighbors,
         "R_thrust": neighbors(best["R_thrust"], [0.1, 0.5, 1.0, 2.0, 10.0]),
         "R_angle":  neighbors(best["R_angle"], [0.25, 0.5, 1.0, 2.0, 4.0]),
         "N":        [best["N"]],
         "NC":       [best["NC"]],
     }
+
+
 # ============================================================
 # WORKER FUNCTION (runs in subprocess)
 # ============================================================
@@ -72,7 +79,8 @@ def evaluate_single(args):
     from Simulation import quad_sim
     from edmdc_mpc import (
         EDMDcMPC_QP, load_edmdc_model, lifted_state_from_x,
-        drop_to_12state, precompute_ref_std, build_ref_horizon, rmse,
+        drop_to_12state, precompute_ref_std, build_ref_horizon,
+        reference_yaw_arrays, wrap_angle_pi, rmse,
     )
 
     model    = load_edmdc_model(model_file)
@@ -84,27 +92,39 @@ def evaluate_single(args):
     n_obs    = model["n_obs"]
 
     sim = quad_sim()
+    nominal_sim = quad_sim()
 
     Q_pos, Q_vel = config["Q_pos"], config["Q_vel"]
     R_thrust, R_angle = config["R_thrust"], config["R_angle"]
-    Q_yaw = config["Q_yaw"]
     N, NC = int(config["N"]), int(config["NC"])
 
     if NC > N:
         return config, float("inf"), {}
 
     Q_diag = np.array([
-        Q_pos, Q_pos, Q_pos,
-        Q_vel, Q_vel, Q_vel,
-        0.0, 0.0, Q_yaw,
-        0.0, 0.0, 0.0
+        Q_pos, Q_Y_MULT_FIXED * Q_pos, Q_pos,
+        Q_vel, Q_VY_MULT_FIXED * Q_vel, Q_vel,
+        0.0, 0.0, Q_YAW_FIXED,
+        0.0, 0.0, Q_R_FIXED,
     ], dtype=float)
-    R_diag  = np.array([R_thrust, R_angle, R_angle, R_angle], dtype=float)
+    R_diag  = np.array([R_thrust, R_angle, R_angle], dtype=float)
     Rd_diag = R_diag * 0.1
+    input_dim = B_edmd.shape[1]
+    if input_dim == 4:
+        R_diag = np.r_[R_diag, YAW_R_FIXED]
+        Rd_diag = np.r_[Rd_diag, YAW_RD_FIXED]
+        du_min = np.r_[DU_MIN_FIXED, -DU_YAW_FIXED]
+        du_max = np.r_[DU_MAX_FIXED,  DU_YAW_FIXED]
+    elif input_dim == 3:
+        du_min = DU_MIN_FIXED
+        du_max = DU_MAX_FIXED
+    else:
+        return config, float("inf"), {}
 
     Cz = np.zeros((12, n_obs))
     Cz[:12, :12] = np.eye(12)
-    u_nominal = np.array([sim.q_mass * sim.g, 0.0, 0.0, 0.0], dtype=float)
+    u_nominal = np.zeros(input_dim, dtype=float)
+    u_nominal[:3] = [sim.q_mass * sim.g, 0.0, 0.0]
 
     try:
         mpc = EDMDcMPC_QP(
@@ -112,7 +132,7 @@ def evaluate_single(args):
             N=N, NC=NC,
             Q=np.diag(Q_diag), R=np.diag(R_diag), Rd=np.diag(Rd_diag),
             u_scaler=u_scaler,
-            du_min=DU_MIN_FIXED, du_max=DU_MAX_FIXED,
+            du_min=du_min, du_max=du_max,
             u_nominal_raw=u_nominal,
         )
     except Exception:
@@ -123,17 +143,26 @@ def evaluate_single(args):
 
     for (t_ref, X_true, ref_traj_dicts, ref_xyz, label) in test_data_list:
         T_eval = min(n_steps, len(t_ref), X_true.shape[0])
-        ref_std = precompute_ref_std(ref_traj_dicts[:T_eval], scaler, n_states=12)
+        ref_std = precompute_ref_std(ref_traj_dicts[:T_eval], scaler, dt=dt)
+        sim.controller_PID.fct_reset()
+        nominal_sim.controller_PID.fct_reset()
 
         X_mpc = np.zeros((T_eval, 12))
-        x_current_12 = X_true[0].copy()
+        x_current_12 = drop_to_12state(X_true[0])
         X_mpc[0] = drop_to_12state(x_current_12)
 
         for k in range(T_eval - 1):
             x12 = drop_to_12state(x_current_12)
             z_k = lifted_state_from_x(x12, scaler)
             x_ref_h = build_ref_horizon(ref_std, k, N)
-            u_cmd = mpc.compute(z_k, x_ref_h)
+            u_nom = np.zeros(input_dim, dtype=float)
+            _, _, u_att_nom = nominal_sim.controller_PID.fct_step(
+                x_current_12, ref_traj_dicts[k], dt
+            )
+            u_nom[:3] = u_att_nom[:3]
+            if input_dim == 4:
+                u_nom[3] = u_att_nom[3]
+            u_cmd = mpc.compute(z_k, x_ref_h, u_nominal_raw=u_nom)
 
             u_cmd[0] = np.clip(u_cmd[0], 0.5 * sim.q_mass * sim.g,
                                           2.0 * sim.q_mass * sim.g)
@@ -141,20 +170,32 @@ def evaluate_single(args):
                                            sim.controller_PID.tilt_max)
             u_cmd[2] = np.clip(u_cmd[2], -sim.controller_PID.tilt_max,
                                            sim.controller_PID.tilt_max)
-            u_cmd[3] = np.clip(u_cmd[3], -sim.controller_PID.yaw_tau_max, 
-                                          sim.controller_PID.yaw_tau_max)
+            if input_dim == 4:
+                psi_des = u_cmd[3]
+            else:
+                psi_des = u_att_nom[3]
 
             x_next_12 = sim.sim_PID.fct_step_attitude(
                 x_current_12,
-                u1=u_cmd[0], phi_des=u_cmd[1], theta_des=u_cmd[2], psi_des=u_cmd[3],
-                dt=dt
+                u1=u_cmd[0], phi_des=u_cmd[1], theta_des=u_cmd[2],
+                dt=dt,
+                psi_des=psi_des,
             )
             x_current_12 = x_next_12
             X_mpc[k + 1] = drop_to_12state(x_next_12)
 
         pos_rmse_traj = rmse(X_mpc[:, 0:3], ref_xyz[:T_eval])
+        ref_yaw, ref_r = reference_yaw_arrays(ref_traj_dicts[:T_eval], dt=dt)
+        yaw_err = wrap_angle_pi(X_mpc[:, 8] - ref_yaw)
+        yaw_rmse_traj = float(np.sqrt(np.mean(yaw_err**2)))
+        r_rmse_traj = rmse(X_mpc[:, 11], ref_r)
+        traj_score = (
+            pos_rmse_traj
+            + SCORE_YAW_WEIGHT * yaw_rmse_traj
+            + SCORE_R_WEIGHT * r_rmse_traj
+        )
         per_traj_rmse[label] = pos_rmse_traj
-        total_rmse_sum += pos_rmse_traj
+        total_rmse_sum += traj_score
 
     avg_rmse = total_rmse_sum / len(test_data_list)
     return config, avg_rmse, per_traj_rmse
@@ -216,6 +257,9 @@ def main():
     # --- Load and downsample ---
     t_all, states_all, U_all, ref_traj_list = load_simulation_runs(data_file)
 
+    if U_all.shape[2] == 4:
+        U_all = U_all[:, :, :3]
+
     sim_dt = t_all[0, 1] - t_all[0, 0]
     step = int(round(dt / sim_dt))
     idx_ds = np.arange(0, t_all.shape[1], step)
@@ -256,7 +300,7 @@ def main():
     print(f"\n{'='*70}")
     print(f"TOP 15 CONFIGS (coarse, {FAST_STEPS} steps)")
     print(f"{'='*70}")
-    header = f"{'#':>3s}  {'avg_RMSE':>9s}  {'N':>3s} {'NC':>3s}  {'Q_pos':>8s}  {'Q_vel':>6s}  {'R_thr':>8s}  {'R_ang':>6s}"
+    header = f"{'#':>3s}  {'avg_score':>9s}  {'N':>3s} {'NC':>3s}  {'Q_pos':>8s}  {'Q_vel':>6s}  {'R_thr':>8s}  {'R_ang':>6s}"
     print(header)
     print("-" * len(header))
     for i, (ar, pt, cfg) in enumerate(results[:15]):
@@ -314,7 +358,7 @@ def main():
     print(f"FINAL RANKING")
     print(f"{'='*70}")
     for i, (ar, pt, cfg) in enumerate(final_results[:5]):
-        print(f"\n  #{i+1}  avg_RMSE = {ar:.4f}")
+        print(f"\n  #{i+1}  avg_score = {ar:.4f}")
         for lbl, v in pt.items():
             print(f"    {lbl:>12s}: {v:.4f} m")
         print(f"    Config: N={cfg['N']} NC={cfg['NC']} "
@@ -326,20 +370,23 @@ def main():
     Rd_a = best['R_angle'] * 0.1
 
     print(f"\n{'='*70}")
-    print(f"PASTE INTO EDMDc_MPC.py:")
+    print(f"PASTE INTO compare_three.py / final_comparison.py:")
     print(f"{'='*70}")
-    print(f"N_EDMD  = {best['N']}")
-    print(f"NC_EDMD = {best['NC']}")
+    print(f"N_MPC  = {best['N']}")
+    print(f"NC_MPC = {best['NC']}")
     print(f"")
-    print(f"Q_DIAG_EDMD = np.array([")
-    print(f"    {best['Q_pos']}, {best['Q_pos']}, {best['Q_pos']},")
-    print(f"    {best['Q_vel']}, {best['Q_vel']}, {best['Q_vel']},")
-    print(f"    0.0, 0.0, 0.0,")
-    print(f"    0.0, 0.0, 0.0,")
+    print(f"Q_DIAG = np.array([")
+    print(f"    {best['Q_pos']}, {Q_Y_MULT_FIXED * best['Q_pos']}, {best['Q_pos']},")
+    print(f"    {best['Q_vel']}, {Q_VY_MULT_FIXED * best['Q_vel']}, {best['Q_vel']},")
+    print(f"    0.0, 0.0, {Q_YAW_FIXED},")
+    print(f"    0.0, 0.0, {Q_R_FIXED},")
     print(f"], dtype=float)")
     print(f"")
-    print(f"R_DIAG_EDMD  = np.array([{best['R_thrust']}, {best['R_angle']}, {best['R_angle']}, {best['R_angle']}], dtype=float)")
-    print(f"RD_DIAG_EDMD = np.array([{Rd_t}, {Rd_a}, {Rd_a}, {Rd_a}], dtype=float)")
+    print(f"R_DIAG  = np.array([{best['R_thrust']}, {best['R_angle']}, {best['R_angle']}], dtype=float)")
+    print(f"RD_DIAG = np.array([{Rd_t}, {Rd_a}, {Rd_a}], dtype=float)")
+    print(f"R_YAW   = {YAW_R_FIXED}")
+    print(f"RD_YAW  = {YAW_RD_FIXED}")
+    print(f"DU_YAW  = {DU_YAW_FIXED}")
     print(f"{'='*70}")
 
 
