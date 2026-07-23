@@ -44,13 +44,20 @@ class quad_sim:
     dt = 0.01
     time = np.arange(0.0, 100.0, dt)
 
+    # Paper-style tracking experiment:
+    # keep yaw/r in the plant and command psi_des, but regulate yaw to a fixed
+    # heading instead of making the vehicle face along the trajectory tangent.
+    TARGET_TRAJECTORY_YAW_FOLLOWS_PATH = False
+    TARGET_TRAJECTORY_YAW_CONSTANT = 0.0
+
     def fct_make_helical_trajectory(self, time,
                                     center=(0.0, 0.0),
                                     radius=1.0,
                                     z_start=0.5,
                                     z_end=3.0,
                                     n_turns=3.0,
-                                    yaw_follows_path=True):
+                                    yaw_follows_path=True,
+                                    yaw_constant=0.0):
         """
         Make a helical trajectory:
         - circle of given radius around (cx, cy)
@@ -98,7 +105,7 @@ class quad_sim:
             if yaw_follows_path:
                 yaw = np.arctan2(vy, vx)  # heading along the path
             else:
-                yaw = 0.0  # or any constant you like
+                yaw = float(yaw_constant)
 
             traj.append({
                 "pos": np.array([x, y, z], dtype=float),
@@ -361,7 +368,8 @@ class quad_sim:
                                       fx=1.0, fy=2.0, fz=3.0,
                                       phase_y=np.pi / 2, phase_z=np.pi / 4,
                                       n_loops=1.0,
-                                      yaw_follows_path=True):
+                                      yaw_follows_path=True,
+                                      yaw_constant=0.0):
         time = np.asarray(time, dtype=float)
         t0 = float(time[0])
         T = float(time[-1] - time[0])
@@ -379,7 +387,7 @@ class quad_sim:
             vy = ay * fy * omega * np.cos(fy * omega * tr + phase_y)
             vz = az * fz * omega * np.cos(fz * omega * tr + phase_z)
 
-            yaw = np.arctan2(vy, vx) if yaw_follows_path else 0.0
+            yaw = np.arctan2(vy, vx) if yaw_follows_path else float(yaw_constant)
 
             traj.append({
                 "pos": np.array([x, y, z], dtype=float),
@@ -503,7 +511,8 @@ class quad_sim:
                 z_start=0.0,
                 z_end=rng.uniform(3, 10),
                 n_turns=1,
-                yaw_follows_path=True
+                yaw_follows_path=self.TARGET_TRAJECTORY_YAW_FOLLOWS_PATH,
+                yaw_constant=self.TARGET_TRAJECTORY_YAW_CONSTANT
             )
         elif traj == 2:
             return self.fct_make_figure8_trajectory(
@@ -512,7 +521,8 @@ class quad_sim:
                 b=rng.uniform(25, 35),
                 n_loops=1,
                 tilt_deg=rng.uniform(10, 80),
-                yaw_follows_path=True
+                yaw_follows_path=self.TARGET_TRAJECTORY_YAW_FOLLOWS_PATH,
+                yaw_constant=self.TARGET_TRAJECTORY_YAW_CONSTANT
             )
         elif traj == 3:
             return self.fct_make_lissajous_trajectory(
@@ -527,7 +537,8 @@ class quad_sim:
                 phase_y=rng.uniform(0, np.pi),
                 phase_z=rng.uniform(0, np.pi),
                 n_loops=1.0,
-                yaw_follows_path=True
+                yaw_follows_path=self.TARGET_TRAJECTORY_YAW_FOLLOWS_PATH,
+                yaw_constant=self.TARGET_TRAJECTORY_YAW_CONSTANT
             )
         elif traj == 4:
             return self.fct_make_random_waypoint_trajectory(

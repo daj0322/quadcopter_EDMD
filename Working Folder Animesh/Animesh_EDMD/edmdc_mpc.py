@@ -6,6 +6,73 @@ import osqp
 STATE_DIM = 12
 STATE_LABELS = ["x", "y", "z", "vx", "vy", "vz", "phi", "theta", "psi", "p", "q", "r"]
 REDUCED_10_INDICES = [0, 1, 2, 3, 4, 5, 6, 7, 9, 10]
+RAW_INPUT_DIM = 4
+RAW_INPUT_LABELS = ["thrust", "phi_des", "theta_des", "psi_des"]
+INPUT_LIFT_TYPE = "thrust_direction"
+INPUT_LIFT_LABELS = RAW_INPUT_LABELS + ["thrust_x", "thrust_y", "thrust_z"]
+
+
+def thrust_direction_from_state_phys(states_phys):
+    """Return the world-frame thrust direction from physical 12-state samples."""
+    states = np.asarray(states_phys, dtype=float)
+    scalar = states.ndim == 1
+    states_2d = np.atleast_2d(states)
+
+    if states_2d.shape[1] < STATE_DIM:
+        raise ValueError(
+            f"Expected at least {STATE_DIM} state entries, got {states_2d.shape[1]}"
+        )
+
+    phi = states_2d[:, 6]
+    theta = states_2d[:, 7]
+    psi = states_2d[:, 8]
+
+    s_phi, c_phi = np.sin(phi), np.cos(phi)
+    s_theta, c_theta = np.sin(theta), np.cos(theta)
+    s_psi, c_psi = np.sin(psi), np.cos(psi)
+
+    dirs = np.column_stack([
+        c_psi*s_theta*c_phi + s_psi*s_phi,
+        s_psi*s_theta*c_phi - c_psi*s_phi,
+        c_theta*c_phi,
+    ])
+    return dirs[0] if scalar else dirs
+
+
+def lift_inputs_from_phys(states_phys, raw_inputs):
+    """Map raw commands to the learned EDMDc input vector."""
+    states = np.asarray(states_phys, dtype=float)
+    raw = np.asarray(raw_inputs, dtype=float)
+    scalar = states.ndim == 1 and raw.ndim == 1
+
+    states_2d = np.atleast_2d(states)
+    raw_2d = np.atleast_2d(raw)
+
+    if raw_2d.shape[1] < RAW_INPUT_DIM:
+        raise ValueError(
+            f"Expected {RAW_INPUT_DIM} raw input channels, got {raw_2d.shape[1]}"
+        )
+
+    if states_2d.shape[0] == 1 and raw_2d.shape[0] > 1:
+        states_2d = np.repeat(states_2d, raw_2d.shape[0], axis=0)
+    elif raw_2d.shape[0] == 1 and states_2d.shape[0] > 1:
+        raw_2d = np.repeat(raw_2d, states_2d.shape[0], axis=0)
+
+    if states_2d.shape[0] != raw_2d.shape[0]:
+        raise ValueError(
+            f"State/input sample mismatch: {states_2d.shape[0]} vs {raw_2d.shape[0]}"
+        )
+
+    raw_4 = raw_2d[:, :RAW_INPUT_DIM]
+    thrust = raw_4[:, :1]
+    thrust_dir = thrust_direction_from_state_phys(states_2d)
+    lifted = np.hstack([raw_4, thrust * thrust_dir])
+    return lifted[0] if scalar else lifted
+
+
+def scaled_lifted_input_from_phys(state_phys, raw_input, u_scaler):
+    lifted = lift_inputs_from_phys(state_phys, raw_input)
+    return u_scaler.transform(np.atleast_2d(lifted)).flatten()
 
 
 # File I/O
@@ -113,6 +180,23 @@ def _observables_12state(x_std, scaler):
         x[9] * x[11],    # p * r
     ])
 
+    obs.extend([
+        x[0] * x[1],     # x * y
+        x[0] * x[3],     # x * vx
+        x[1] * x[4],     # y * vy
+        x[0] * x[4],     # x * vy
+        x[1] * x[3],     # y * vx
+        x[3] * x[4],     # vx * vy
+        x[0] * x[0],     # x^2
+        x[1] * x[1],     # y^2
+        x[3] * x[3],     # vx^2
+        x[4] * x[4],     # vy^2
+        x[0] * x[7],     # x * theta
+        x[1] * x[6],     # y * phi
+        x[3] * x[7],     # vx * theta
+        x[4] * x[6],     # vy * phi
+    ])
+
     vx, vy, vz = x[3], x[4], x[5]
     body_vx = c_theta*c_psi*vx + c_theta*s_psi*vy - s_theta*vz
     body_vy = (s_phi*s_theta*c_psi - c_phi*s_psi)*vx + \
@@ -198,9 +282,10 @@ class EDMDcMPC_QP:
     selected by Cz while optimizing control increments over the control horizon.
     """
     def __init__(self, A, B, Cz, N, NC, Q, R, Rd,
-                 u_scaler, du_min, du_max, u_nominal_raw):
+                 u_scaler, du_min, du_max, u_nominal_raw,
+                 state_scaler=None, input_lift_type=None, raw_input_dim=None):
         self.A  = np.asarray(A, dtype=float)
-        self.B  = np.asarray(B, dtype=float)
+        self.B_model = np.asarray(B, dtype=float)
         self.Cz = np.asarray(Cz, dtype=float)
         self.N  = int(N)
         self.NC = int(NC)
@@ -208,29 +293,44 @@ class EDMDcMPC_QP:
         self.R  = np.asarray(R,  dtype=float)
         self.Rd = np.asarray(Rd, dtype=float)
 
-        self.u_scaler      = u_scaler
-        self._set_nominal_input(u_nominal_raw)
+        self.u_scaler = u_scaler
+        self.state_scaler = state_scaler
+        self.input_lift_type = input_lift_type
+        self.raw_input_dim = raw_input_dim
 
         self.du_min = np.asarray(du_min, dtype=float)
         self.du_max = np.asarray(du_max, dtype=float)
 
         self.nz   = self.A.shape[0]   # observable dimension
-        self.nu   = self.B.shape[1]   # input dimension
+        self.model_nu = self.B_model.shape[1]
+        nominal_input_size = np.asarray(u_nominal_raw, dtype=float).size
+        self.uses_lifted_input = (
+            self.input_lift_type == INPUT_LIFT_TYPE
+            or (self.model_nu == len(INPUT_LIFT_LABELS)
+                and getattr(self.u_scaler, "n_features_in_", self.model_nu) == self.model_nu
+                and (raw_input_dim == RAW_INPUT_DIM or nominal_input_size == RAW_INPUT_DIM))
+        )
+        if self.uses_lifted_input:
+            if self.state_scaler is None:
+                raise ValueError("state_scaler is required for thrust-direction input lifting")
+            self.raw_input_dim = RAW_INPUT_DIM if self.raw_input_dim is None else int(self.raw_input_dim)
+            self.nu = self.raw_input_dim
+            self._lift_state_phys = np.zeros(STATE_DIM)
+        else:
+            self.nu = self.model_nu
+        self.B = self.B_model[:, :self.nu] if self.uses_lifted_input else self.B_model
+
         self.nx   = self.Cz.shape[0]  # tracked physical-state dimension
         self.nvar = self.NC * self.nu
 
+        if self.du_min.size != self.nu or self.du_max.size != self.nu:
+            raise ValueError(
+                f"du_min/du_max must have length {self.nu}, got "
+                f"{self.du_min.size}/{self.du_max.size}"
+            )
+
+        self._set_nominal_input(u_nominal_raw)
         self._du_prev = np.zeros(self.nvar)
-
-        self.Sz, self.Su = self._build_prediction_matrices()
-
-        # Map lifted-state predictions to the tracked physical-state coordinates.
-        Su_dense = self.Su.toarray()
-        Su_phys  = np.zeros((self.N * self.nx, self.nvar))
-        for i in range(self.N):
-            for j in range(self.NC):
-                Su_phys[i*self.nx:(i+1)*self.nx, j*self.nu:(j+1)*self.nu] = \
-                    self.Cz @ Su_dense[i*self.nz:(i+1)*self.nz, j*self.nu:(j+1)*self.nu]
-        self.Su_phys = sp.csc_matrix(Su_phys)
 
         self.Qbar = sp.block_diag(
             [sp.csc_matrix(self.Q) for _ in range(self.N)], format="csc")
@@ -243,26 +343,102 @@ class EDMDcMPC_QP:
             if self.NC > 1 else None
         )
 
-        P     = self._build_hessian()
-        Aineq = sp.eye(self.nvar, format="csc")
-        l     = np.tile(self.du_min, self.NC)
-        u     = np.tile(self.du_max, self.NC)
+        self.Aineq = sp.eye(self.nvar, format="csc")
+        self.l = np.tile(self.du_min, self.NC)
+        self.u_bound = np.tile(self.du_max, self.NC)
 
+        self._refresh_prediction_model()
         self.prob = osqp.OSQP()
-        self.prob.setup(P=P, q=np.zeros(self.nvar),
-                        A=Aineq, l=l, u=u,
+        self.prob.setup(P=self.P, q=np.zeros(self.nvar),
+                        A=self.Aineq, l=self.l, u=self.u_bound,
                         warm_start=True, verbose=False, polish=False)
 
     def _set_nominal_input(self, u_nominal_raw):
-        self.u_nom_raw = np.asarray(u_nominal_raw, dtype=float)
-        self.u_nom_scaled = self.u_scaler.transform(
-            self.u_nom_raw.reshape(1, -1)).flatten()
+        self.u_nom_raw = np.asarray(u_nominal_raw, dtype=float).flatten()
+        if self.u_nom_raw.size < self.nu:
+            raise ValueError(f"Expected at least {self.nu} nominal inputs, got {self.u_nom_raw.size}")
+        self.u_nom_raw = self.u_nom_raw[:self.nu]
+
+        if self.uses_lifted_input:
+            self.u_nom_model_scaled = scaled_lifted_input_from_phys(
+                self._lift_state_phys, self.u_nom_raw, self.u_scaler
+            )
+            self.u_nom_scaled = (
+                (self.u_nom_raw - self.u_scaler.mean_[:self.nu])
+                / self.u_scaler.scale_[:self.nu]
+            )
+        else:
+            self.u_nom_scaled = self.u_scaler.transform(
+                self.u_nom_raw.reshape(1, -1)).flatten()
+            self.u_nom_model_scaled = self.u_nom_scaled
+
         if hasattr(self, "NC"):
             self.u_nom_horizon_scaled = np.tile(self.u_nom_scaled, self.NC)
+            self.u_nom_model_horizon_scaled = np.tile(self.u_nom_model_scaled, self.NC)
+
+    def _input_lift_jacobian(self):
+        """
+        Map raw standardized command deltas to lifted standardized input deltas.
+
+        The learned model input is
+        [thrust, phi_des, theta_des, psi_des, thrust*dir_x, thrust*dir_y, thrust*dir_z].
+        The QP still optimizes the 4 real commands, so the three extra columns
+        need the local thrust-direction sensitivity.
+        """
+        if not self.uses_lifted_input:
+            return np.eye(self.model_nu)
+
+        J = np.zeros((self.model_nu, self.nu))
+        J[:self.nu, :self.nu] = np.eye(self.nu)
+
+        thrust_dir = thrust_direction_from_state_phys(self._lift_state_phys)
+        thrust_scale = self.u_scaler.scale_[0]
+        for axis in range(3):
+            lifted_idx = RAW_INPUT_DIM + axis
+            J[lifted_idx, 0] = (
+                thrust_scale * thrust_dir[axis] / self.u_scaler.scale_[lifted_idx]
+            )
+        return J
+
+    def _refresh_prediction_model(self):
+        if self.uses_lifted_input:
+            self.B = self.B_model @ self._input_lift_jacobian()
+        else:
+            self.B = self.B_model
+
+        self.Sz, self.Su, self.Su_model = self._build_prediction_matrices()
+
+        Su_dense = self.Su.toarray()
+        Su_phys = np.zeros((self.N * self.nx, self.nvar))
+        for i in range(self.N):
+            for j in range(self.NC):
+                Su_phys[i*self.nx:(i+1)*self.nx, j*self.nu:(j+1)*self.nu] = (
+                    self.Cz @ Su_dense[i*self.nz:(i+1)*self.nz,
+                                       j*self.nu:(j+1)*self.nu]
+                )
+        self.Su_phys = sp.csc_matrix(Su_phys)
+        self.P = self._build_hessian()
+
+    def _setup_solver(self):
+        self.prob = osqp.OSQP()
+        self.prob.setup(P=self.P, q=np.zeros(self.nvar),
+                        A=self.Aineq, l=self.l, u=self.u_bound,
+                        warm_start=True, verbose=False, polish=False)
+
+    def _set_lift_state_from_z(self, z0):
+        if not self.uses_lifted_input:
+            return
+        z0 = np.asarray(z0, dtype=float).flatten()
+        x_std = z0[:STATE_DIM]
+        self._lift_state_phys = self.state_scaler.inverse_transform(
+            x_std.reshape(1, -1)
+        ).flatten()
+        self._set_nominal_input(self.u_nom_raw)
 
     def _build_prediction_matrices(self):
         Sz = np.zeros((self.N * self.nz, self.nz))
         Su = np.zeros((self.N * self.nz, self.NC * self.nu))
+        Su_model = np.zeros((self.N * self.nz, self.NC * self.model_nu))
         A_pow = [np.eye(self.nz)]
         for _ in range(self.N):
             A_pow.append(A_pow[-1] @ self.A)
@@ -274,7 +450,9 @@ class EDMDcMPC_QP:
                 j = min(input_step, self.NC - 1)
                 Su[i*self.nz:(i+1)*self.nz, j*self.nu:(j+1)*self.nu] += \
                     A_pow[i-input_step] @ self.B
-        return sp.csc_matrix(Sz), sp.csc_matrix(Su)
+                Su_model[i*self.nz:(i+1)*self.nz, j*self.model_nu:(j+1)*self.model_nu] += \
+                    A_pow[i-input_step] @ self.B_model
+        return sp.csc_matrix(Sz), sp.csc_matrix(Su), sp.csc_matrix(Su_model)
 
     def _build_difference_matrix(self):
         if self.NC <= 1:
@@ -300,7 +478,7 @@ class EDMDcMPC_QP:
         # The learned EDMD model uses absolute standardized inputs. The QP
         # variables are deltas around the nominal input, so the nominal input
         # response must be part of the free trajectory.
-        z_free = self.Sz @ z0 + self.Su @ self.u_nom_horizon_scaled
+        z_free = self.Sz @ z0 + self.Su_model @ self.u_nom_model_horizon_scaled
         x_free = np.array([
             self.Cz @ z_free[i*self.nz:(i+1)*self.nz]
             for i in range(self.N)
@@ -311,8 +489,13 @@ class EDMDcMPC_QP:
         ).reshape(-1)
 
     def compute(self, z0, x_ref_std_horizon, u_nominal_raw=None):
+        self._set_lift_state_from_z(z0)
         if u_nominal_raw is not None:
             self._set_nominal_input(u_nominal_raw)
+
+        if self.uses_lifted_input:
+            self._refresh_prediction_model()
+            self._setup_solver()
 
         q = self._build_q(z0, x_ref_std_horizon)
         self.prob.update(q=q)
@@ -328,9 +511,12 @@ class EDMDcMPC_QP:
             du0 = du_opt[:self.nu]
 
         u0_scaled = self.u_nom_scaled + du0
-        u0_raw    = self.u_scaler.inverse_transform(
-            u0_scaled.reshape(1, -1)).flatten()
-        return u0_raw  # [thrust, phi_des, theta_des]
+        if self.uses_lifted_input:
+            u0_raw = u0_scaled * self.u_scaler.scale_[:self.nu] + self.u_scaler.mean_[:self.nu]
+        else:
+            u0_raw = self.u_scaler.inverse_transform(
+                u0_scaled.reshape(1, -1)).flatten()
+        return u0_raw  # [thrust, phi_des, theta_des, optional psi_des]
 
 
 # Reference processing

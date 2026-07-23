@@ -24,15 +24,20 @@ SCRIPT_DIR       = Path(__file__).resolve().parent
 EDMDC_MODEL_FILE = "edmdc_model_300.pkl"
 DATA_FILE        = "runs_mixed_n300.pkl"
 
-TEST_INDICES = [39, 59, 99, 129, 155, 210]
-TEST_LABELS  = ["helix_sm", "fig8", "helix_lg", "lissajous", "waypoint", "hover"]
+TEST_INDICES = [39, 59, 129]
+TEST_LABELS  = ["helix", "fig8", "lissajous"]
 
-FAST_STEPS = 300
-TOP_K      = 10
+RUN_FOCUSED_FULL_ONLY = True
+FAST_STEPS = 500
+VALIDATION_STEPS = 10000
+FINAL_VALIDATION_STEPS = 10000
+TOP_K      = 5
+FINAL_TOP_K = 5
+MAX_WORKERS = 8
 
 DU_MIN_FIXED = np.array([-0.5, -0.05, -0.05], dtype=float)
 DU_MAX_FIXED = np.array([ 0.5,  0.05,  0.05], dtype=float)
-DU_YAW_FIXED = 0.05
+DU_YAW_FIXED = 0.005
 Q_Y_MULT_FIXED = 1.6
 Q_VY_MULT_FIXED = 1.6
 Q_YAW_FIXED = 20000.0
@@ -41,28 +46,69 @@ YAW_R_FIXED = 0.25
 YAW_RD_FIXED = 0.025
 SCORE_YAW_WEIGHT = 0.25
 SCORE_R_WEIGHT = 0.03
+SCORE_PID_RMSE_FLOOR = 0.5
+SCORE_WORST_TRAJ_WEIGHT = 0.15
+LISSAJOUS_RMSE_LIMIT = 8.0
+LISSAJOUS_LIMIT_PENALTY = 2.0
+USE_CONSTANT_YAW_REFERENCE = True
+CONSTANT_YAW = 0.0
 
 GRID_COARSE = {
-    "Q_pos":    [50000, 100000, 200000, 500000],
-    "Q_vel":    [100, 500, 1000, 5000],
-    "R_thrust": [0.0001, 0.001, 0.01],
-    "R_angle":  [0.01, 0.1, 0.5],
-    "N":        [20, 30, 50],
-    "NC":       [10, 15, 25],
+    "Q_pos":    [250000, 300000, 350000, 400000],
+    "Q_vel":    [25, 35, 50],
+    "R_thrust": [2.5e-05, 5.0e-05, 0.0001],
+    "R_angle":  [0.25, 0.40, 0.50, 0.75],
+    "N":        [15, 20],
+    "NC":       [15],
 }
+
+FOCUSED_FULL_CONFIGS = [
+    # Current/previous manually useful blocks.
+    {"Q_pos": 250000, "Q_vel": 25, "R_thrust": 0.0001,  "R_angle": 0.25, "N": 15, "NC": 15},
+    {"Q_pos": 400000, "Q_vel": 25, "R_thrust": 0.0001,  "R_angle": 0.75, "N": 20, "NC": 15},
+    {"Q_pos": 400000, "Q_vel": 50, "R_thrust": 2.5e-05, "R_angle": 0.50, "N": 20, "NC": 15},
+
+    # N=15 local checks around the current block.
+    {"Q_pos": 250000, "Q_vel": 25, "R_thrust": 0.0001,  "R_angle": 0.40, "N": 15, "NC": 15},
+    {"Q_pos": 250000, "Q_vel": 25, "R_thrust": 0.0001,  "R_angle": 0.50, "N": 15, "NC": 15},
+
+    # N=20 checks intended to recover lissajous without ruining fig8.
+    {"Q_pos": 250000, "Q_vel": 25, "R_thrust": 0.0001,  "R_angle": 0.25, "N": 20, "NC": 15},
+    {"Q_pos": 250000, "Q_vel": 25, "R_thrust": 0.0001,  "R_angle": 0.40, "N": 20, "NC": 15},
+    {"Q_pos": 250000, "Q_vel": 25, "R_thrust": 0.0001,  "R_angle": 0.50, "N": 20, "NC": 15},
+    {"Q_pos": 250000, "Q_vel": 25, "R_thrust": 0.0001,  "R_angle": 0.75, "N": 20, "NC": 15},
+    {"Q_pos": 300000, "Q_vel": 25, "R_thrust": 0.0001,  "R_angle": 0.50, "N": 20, "NC": 15},
+    {"Q_pos": 300000, "Q_vel": 25, "R_thrust": 0.0001,  "R_angle": 0.75, "N": 20, "NC": 15},
+    {"Q_pos": 350000, "Q_vel": 25, "R_thrust": 0.0001,  "R_angle": 0.50, "N": 20, "NC": 15},
+    {"Q_pos": 350000, "Q_vel": 25, "R_thrust": 0.0001,  "R_angle": 0.75, "N": 20, "NC": 15},
+    {"Q_pos": 400000, "Q_vel": 25, "R_thrust": 0.0001,  "R_angle": 0.50, "N": 20, "NC": 15},
+    {"Q_pos": 400000, "Q_vel": 35, "R_thrust": 0.0001,  "R_angle": 0.50, "N": 20, "NC": 15},
+    {"Q_pos": 400000, "Q_vel": 35, "R_thrust": 0.0001,  "R_angle": 0.75, "N": 20, "NC": 15},
+    {"Q_pos": 400000, "Q_vel": 25, "R_thrust": 5.0e-05, "R_angle": 0.50, "N": 20, "NC": 15},
+    {"Q_pos": 400000, "Q_vel": 25, "R_thrust": 5.0e-05, "R_angle": 0.75, "N": 20, "NC": 15},
+]
 
 
 def make_fine_grid(best):
     def neighbors(val, factors):
         return sorted(set(val * f for f in factors))
     return {
-        "Q_pos":    neighbors(best["Q_pos"], [0.5, 0.75, 1.0, 1.25, 1.5]),
-        "Q_vel":    neighbors(best["Q_vel"], [0.25, 0.5, 1.0, 2.0, 4.0]),
-        "R_thrust": neighbors(best["R_thrust"], [0.1, 0.5, 1.0, 2.0, 10.0]),
-        "R_angle":  neighbors(best["R_angle"], [0.25, 0.5, 1.0, 2.0, 4.0]),
+        "Q_pos":    neighbors(best["Q_pos"], [0.8, 1.0, 1.2]),
+        "Q_vel":    neighbors(best["Q_vel"], [0.75, 1.0, 1.25]),
+        "R_thrust": neighbors(best["R_thrust"], [0.5, 1.0, 2.0]),
+        "R_angle":  neighbors(best["R_angle"], [0.75, 1.0, 1.25]),
         "N":        [best["N"]],
         "NC":       [best["NC"]],
     }
+
+
+def apply_yaw_reference_mode(ref_traj):
+    if not USE_CONSTANT_YAW_REFERENCE:
+        return ref_traj
+    return [
+        {**wp, "yaw": float(CONSTANT_YAW), "yaw_rate": 0.0}
+        for wp in ref_traj
+    ]
 
 
 # ============================================================
@@ -90,6 +136,12 @@ def evaluate_single(args):
     u_scaler = model["u_scaler"]
     dt       = model["dt"]
     n_obs    = model["n_obs"]
+    model_input_dim = B_edmd.shape[1]
+    input_lift_type = model.get("input_lift_type")
+    if input_lift_type == "thrust_direction":
+        input_dim = int(model.get("raw_input_dim", 4))
+    else:
+        input_dim = model_input_dim
 
     sim = quad_sim()
     nominal_sim = quad_sim()
@@ -109,7 +161,6 @@ def evaluate_single(args):
     ], dtype=float)
     R_diag  = np.array([R_thrust, R_angle, R_angle], dtype=float)
     Rd_diag = R_diag * 0.1
-    input_dim = B_edmd.shape[1]
     if input_dim == 4:
         R_diag = np.r_[R_diag, YAW_R_FIXED]
         Rd_diag = np.r_[Rd_diag, YAW_RD_FIXED]
@@ -134,14 +185,17 @@ def evaluate_single(args):
             u_scaler=u_scaler,
             du_min=du_min, du_max=du_max,
             u_nominal_raw=u_nominal,
+            state_scaler=scaler,
+            input_lift_type=input_lift_type,
+            raw_input_dim=input_dim,
         )
     except Exception:
         return config, float("inf"), {}
 
     per_traj_rmse = {}
-    total_rmse_sum = 0.0
+    traj_scores = []
 
-    for (t_ref, X_true, ref_traj_dicts, ref_xyz, label) in test_data_list:
+    for (t_ref, X_true, ref_traj_dicts, ref_xyz, label, pid_rmse_ref) in test_data_list:
         T_eval = min(n_steps, len(t_ref), X_true.shape[0])
         ref_std = precompute_ref_std(ref_traj_dicts[:T_eval], scaler, dt=dt)
         sim.controller_PID.fct_reset()
@@ -185,19 +239,27 @@ def evaluate_single(args):
             X_mpc[k + 1] = drop_to_12state(x_next_12)
 
         pos_rmse_traj = rmse(X_mpc[:, 0:3], ref_xyz[:T_eval])
+        pos_score = pos_rmse_traj / max(float(pid_rmse_ref), SCORE_PID_RMSE_FLOOR)
         ref_yaw, ref_r = reference_yaw_arrays(ref_traj_dicts[:T_eval], dt=dt)
         yaw_err = wrap_angle_pi(X_mpc[:, 8] - ref_yaw)
         yaw_rmse_traj = float(np.sqrt(np.mean(yaw_err**2)))
         r_rmse_traj = rmse(X_mpc[:, 11], ref_r)
         traj_score = (
-            pos_rmse_traj
+            pos_score
             + SCORE_YAW_WEIGHT * yaw_rmse_traj
             + SCORE_R_WEIGHT * r_rmse_traj
         )
+        if label.lower().startswith("liss"):
+            liss_excess = max(0.0, pos_rmse_traj - LISSAJOUS_RMSE_LIMIT)
+            traj_score += LISSAJOUS_LIMIT_PENALTY * (
+                liss_excess / LISSAJOUS_RMSE_LIMIT
+            )
         per_traj_rmse[label] = pos_rmse_traj
-        total_rmse_sum += traj_score
+        traj_scores.append(traj_score)
 
-    avg_rmse = total_rmse_sum / len(test_data_list)
+    avg_score = float(np.mean(traj_scores))
+    worst_score = float(np.max(traj_scores))
+    avg_rmse = avg_score + SCORE_WORST_TRAJ_WEIGHT * worst_score
     return config, avg_rmse, per_traj_rmse
 
 
@@ -207,6 +269,7 @@ def evaluate_single(args):
 def parallel_sweep(configs, test_data, model_file, n_steps,
                    n_workers, phase_name="Sweep"):
     n_valid = len(configs)
+    n_workers = max(1, min(int(n_workers), n_valid))
     print(f"\n{phase_name}: {n_valid} configs on {n_workers} cores, {n_steps} steps each")
 
     args_list = [
@@ -244,8 +307,8 @@ def grid_to_configs(grid):
 def main():
     from edmdc_mpc import load_edmdc_model, load_simulation_runs, extract_ref_xyz, rmse
 
-    n_workers = mp.cpu_count()
-    print(f"CPU cores: {n_workers}")
+    n_workers = min(MAX_WORKERS, mp.cpu_count())
+    print(f"CPU cores: {mp.cpu_count()}  using workers: {n_workers}")
 
     model_file = SCRIPT_DIR / EDMDC_MODEL_FILE
     data_file  = SCRIPT_DIR / DATA_FILE
@@ -275,7 +338,7 @@ def main():
         ri = run_idx % states_all.shape[0]
         t_ref    = t_all[ri]
         X_true   = states_all[ri]
-        ref_traj = ref_traj_list[ri]
+        ref_traj = apply_yaw_reference_mode(ref_traj_list[ri])
         ref_xyz  = extract_ref_xyz(ref_traj)
         T = min(len(t_ref), X_true.shape[0], ref_xyz.shape[0])
 
@@ -283,8 +346,66 @@ def main():
         print(f"  idx={run_idx:3d} ({label:>10s})  T={T}  PID_RMSE={pid_rmse:.4f} m")
 
         test_data.append((
-            t_ref[:T], X_true[:T], ref_traj[:T], ref_xyz[:T], label
+            t_ref[:T], X_true[:T], ref_traj[:T], ref_xyz[:T], label, pid_rmse
         ))
+
+    if RUN_FOCUSED_FULL_ONLY:
+        seen = set()
+        focused_configs = []
+        for cfg in FOCUSED_FULL_CONFIGS:
+            key = tuple((k, cfg[k]) for k in ("Q_pos", "Q_vel", "R_thrust", "R_angle", "N", "NC"))
+            if key not in seen and cfg["NC"] <= cfg["N"]:
+                seen.add(key)
+                focused_configs.append(cfg)
+
+        final_results = parallel_sweep(
+            focused_configs, test_data, model_file,
+            n_steps=FINAL_VALIDATION_STEPS,
+            n_workers=min(n_workers, len(focused_configs)),
+            phase_name="FOCUSED FULL VALIDATION"
+        )
+
+        print(f"\n{'='*70}")
+        print(f"FINAL RANKING")
+        print(
+            "avg_score uses EDMDc position RMSE normalized by the PID baseline "
+            f"(floor={SCORE_PID_RMSE_FLOOR:.2f} m), plus yaw/r penalties, "
+            f"{SCORE_WORST_TRAJ_WEIGHT:.2f}x worst-trajectory score, and a "
+            f"lissajous penalty above {LISSAJOUS_RMSE_LIMIT:.1f} m."
+        )
+        print(f"{'='*70}")
+        for i, (ar, pt, cfg) in enumerate(final_results[:10]):
+            print(f"\n  #{i+1}  avg_score = {ar:.4f}")
+            for lbl, v in pt.items():
+                print(f"    {lbl:>12s}: {v:.4f} m")
+            print(f"    Config: N={cfg['N']} NC={cfg['NC']} "
+                  f"Q_pos={cfg['Q_pos']} Q_vel={cfg['Q_vel']} "
+                  f"R_thrust={cfg['R_thrust']} R_angle={cfg['R_angle']}")
+
+        best = final_results[0][2]
+        Rd_t = best['R_thrust'] * 0.1
+        Rd_a = best['R_angle'] * 0.1
+
+        print(f"\n{'='*70}")
+        print(f"PASTE INTO compare_three.py / final_comparison.py:")
+        print(f"{'='*70}")
+        print(f"N_MPC  = {best['N']}")
+        print(f"NC_MPC = {best['NC']}")
+        print(f"")
+        print(f"Q_DIAG = np.array([")
+        print(f"    {best['Q_pos']}, {Q_Y_MULT_FIXED * best['Q_pos']}, {best['Q_pos']},")
+        print(f"    {best['Q_vel']}, {Q_VY_MULT_FIXED * best['Q_vel']}, {best['Q_vel']},")
+        print(f"    0.0, 0.0, {Q_YAW_FIXED},")
+        print(f"    0.0, 0.0, {Q_R_FIXED},")
+        print(f"], dtype=float)")
+        print(f"")
+        print(f"R_DIAG  = np.array([{best['R_thrust']}, {best['R_angle']}, {best['R_angle']}], dtype=float)")
+        print(f"RD_DIAG = np.array([{Rd_t}, {Rd_a}, {Rd_a}], dtype=float)")
+        print(f"R_YAW   = {YAW_R_FIXED}")
+        print(f"RD_YAW  = {YAW_RD_FIXED}")
+        print(f"DU_YAW  = {DU_YAW_FIXED}")
+        print(f"{'='*70}")
+        return
 
     # ====================================================
     # PHASE 1: COARSE SWEEP
@@ -317,7 +438,7 @@ def main():
 
     full_results = parallel_sweep(
         top_configs, test_data, model_file,
-        n_steps=1000, n_workers=min(n_workers, TOP_K),
+        n_steps=VALIDATION_STEPS, n_workers=min(n_workers, TOP_K),
         phase_name="PHASE 2 (FULL VALIDATION)"
     )
 
@@ -343,11 +464,11 @@ def main():
     )
 
     # Validate top 5
-    top_fine = [cfg for _, _, cfg in fine_results[:5]]
+    top_fine = [cfg for _, _, cfg in fine_results[:FINAL_TOP_K]]
 
     final_results = parallel_sweep(
         top_fine, test_data, model_file,
-        n_steps=1000, n_workers=min(n_workers, 5),
+        n_steps=FINAL_VALIDATION_STEPS, n_workers=min(n_workers, FINAL_TOP_K),
         phase_name="PHASE 3 VALIDATION"
     )
 
@@ -356,6 +477,12 @@ def main():
     # ====================================================
     print(f"\n{'='*70}")
     print(f"FINAL RANKING")
+    print(
+        "avg_score uses EDMDc position RMSE normalized by the PID baseline "
+        f"(floor={SCORE_PID_RMSE_FLOOR:.2f} m), plus yaw/r penalties, "
+        f"{SCORE_WORST_TRAJ_WEIGHT:.2f}x worst-trajectory score, and a "
+        f"lissajous penalty above {LISSAJOUS_RMSE_LIMIT:.1f} m."
+    )
     print(f"{'='*70}")
     for i, (ar, pt, cfg) in enumerate(final_results[:5]):
         print(f"\n  #{i+1}  avg_score = {ar:.4f}")

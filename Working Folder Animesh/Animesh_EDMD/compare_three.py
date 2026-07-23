@@ -44,34 +44,44 @@ TEST_CASES = [
     (39,  "helix (small)"),
     (59,  "figure-8"),
     (129, "lissajous"),
-    (155, "waypoint"),
-    (210, "hover excitation"),
 ]
 
-# MPC config for the 0.1 s EDMD model produced by EDMDc_training.py.
-N_MPC   = 30
+# MPC config for the 0.01 s EDMD model produced by EDMDc_training.py.
+N_MPC   = 20
 NC_MPC  = 15
 
 Q_DIAG = np.array([
-     75000.0, 120000.0,  75000.0,
-     20000.0,  32000.0,  20000.0,
+    400000.0, 640000.0, 400000.0,
+        50.0,     80.0,     50.0,
          0.0,      0.0,  20000.0,
          0.0,      0.0,   3000.0,
 ], dtype=float)
 
-R_DIAG  = np.array([0.001, 0.25, 0.25], dtype=float)
-RD_DIAG = np.array([0.0001, 0.025, 0.025], dtype=float)
+R_DIAG  = np.array([2.5e-05, 0.5, 0.5], dtype=float)
+RD_DIAG = np.array([2.5e-06, 0.05, 0.05], dtype=float)
 R_YAW   = 0.25
 RD_YAW  = 0.025
 
 USE_PID_NOMINAL = True
+EDMDC_YAW_CORRECTION = True
+USE_CONSTANT_YAW_REFERENCE = True
+CONSTANT_YAW = 0.0
 
 # With USE_PID_NOMINAL, these are corrections around the cascaded PID command
 # in standardized input units. Keeping them small holds EDMD-MPC near the
 # behavior distribution it was trained on.
 DU_MIN = np.array([-0.5, -0.05, -0.05], dtype=float)
 DU_MAX = np.array([ 0.5,  0.05,  0.05], dtype=float)
-DU_YAW = 0.05
+DU_YAW = 0.005
+
+
+def apply_yaw_reference_mode(ref_traj):
+    if not USE_CONSTANT_YAW_REFERENCE:
+        return ref_traj
+    return [
+        {**wp, "yaw": float(CONSTANT_YAW), "yaw_rate": 0.0}
+        for wp in ref_traj
+    ]
 
 
 # Linear hover model
@@ -386,7 +396,17 @@ def main():
     dt       = model["dt"]
     n_obs    = model["n_obs"]
 
-    print(f"EDMDc model: A={A_edmd.shape} B={B_edmd.shape} dt={dt}")
+    model_input_dim_edmd = B_edmd.shape[1]
+    input_lift_type = model.get("input_lift_type")
+    if input_lift_type == "thrust_direction":
+        input_dim_edmd = int(model.get("raw_input_dim", 4))
+    else:
+        input_dim_edmd = model_input_dim_edmd
+
+    print(
+        f"EDMDc model: A={A_edmd.shape} B={B_edmd.shape} dt={dt} "
+        f"raw_inputs={input_dim_edmd}"
+    )
 
     # --- Load test data ---
     t_all, states_all, U_all, ref_traj_list = load_simulation_runs(
@@ -404,13 +424,16 @@ def main():
     ref_traj_list = [r[::step] for r in ref_traj_list]
 
     sim = quad_sim()
-    input_dim_edmd = B_edmd.shape[1]
     if input_dim_edmd not in (3, 4):
         raise ValueError(f"Expected EDMD input dimension 3 or 4, got {input_dim_edmd}")
 
     u_nominal_edmd = np.zeros(input_dim_edmd, dtype=float)
     u_nominal_edmd[:3] = [sim.q_mass * sim.g, 0.0, 0.0]
-    u_scaler_linear = u_scaler if input_dim_edmd == 3 else InputScalerView(u_scaler, 3)
+    u_scaler_linear = (
+        u_scaler
+        if input_dim_edmd == 3 and model_input_dim_edmd == 3
+        else InputScalerView(u_scaler, 3)
+    )
     u_nominal_linear = np.array([sim.q_mass * sim.g, 0.0, 0.0], dtype=float)
 
     # --- Build linear model ---
@@ -429,6 +452,9 @@ def main():
         Rd_edmd = np.diag(np.r_[RD_DIAG, RD_YAW])
         du_min_edmd = np.r_[DU_MIN, -DU_YAW]
         du_max_edmd = np.r_[DU_MAX,  DU_YAW]
+        if not EDMDC_YAW_CORRECTION:
+            du_min_edmd[3] = 0.0
+            du_max_edmd[3] = 0.0
     else:
         R_edmd = np.diag(R_DIAG)
         Rd_edmd = np.diag(RD_DIAG)
@@ -445,6 +471,9 @@ def main():
         u_scaler=u_scaler,
         du_min=du_min_edmd, du_max=du_max_edmd,
         u_nominal_raw=u_nominal_edmd,
+        state_scaler=scaler,
+        input_lift_type=input_lift_type,
+        raw_input_dim=input_dim_edmd,
     )
 
     # --- Build Linear MPC (same QP structure, linear A/B, Cz=I) ---
@@ -481,9 +510,9 @@ def main():
         t_ref   = t_ref[:T]
         X_true  = X_true[:T]
         ref_xyz = ref_xyz[:T]
-        ref_traj = ref_traj[:T]
+        ref_traj = apply_yaw_reference_mode(ref_traj[:T])
 
-        pid_rmse = rmse(X_true[:, 0:3], ref_xyz)
+        pid_data_rmse = rmse(X_true[:, 0:3], ref_xyz)
 
         print(f"\n--- {traj_name} (idx={run_idx}, T={T}) ---")
 
@@ -491,6 +520,8 @@ def main():
         X_pid_slow = run_pid_at_dt(sim, ref_traj, X_true, dt, T)
         pid_slow_rmse = rmse(X_pid_slow[:, 0:3], ref_xyz)
 
+        if USE_CONSTANT_YAW_REFERENCE:
+            print(f"  Stored PID data: {pid_data_rmse:.4f} m  (original heading yaw)")
         print(f"  PID @{dt}s:  {pid_slow_rmse:.4f} m")
 
         # EDMDc MPC
@@ -513,7 +544,7 @@ def main():
         best = min(pid_slow_rmse, edmd_rmse, lin_rmse)
         winner = "PID" if best == pid_slow_rmse else ("EDMDc" if best == edmd_rmse else "Linear")
 
-        print(f"  PID:    {pid_rmse:.4f} m")
+        print(f"  PID:    {pid_slow_rmse:.4f} m")
         print(f"  EDMDc:  {edmd_rmse:.4f} m  ({edmd_time:.2f} ms/step)")
         print(f"          y={edmd_detail['y']:.4f}m  vy={edmd_detail['vy']:.4f}m/s  "
               f"yaw={edmd_detail['yaw']:.4f}rad  r={edmd_detail['r']:.4f}rad/s")
@@ -525,7 +556,7 @@ def main():
         all_results.append({
             "name": traj_name,
             "idx": run_idx,
-            "pid_fast": pid_rmse,
+            "pid_fast": pid_data_rmse,
             "pid":pid_slow_rmse,
             "edmdc": edmd_rmse,
             "linear": lin_rmse,
@@ -612,8 +643,10 @@ def main():
     # ---------------------------------------------------------------
     # PLOT 2: 3D trajectory plots (reference clearly visible)
     # ---------------------------------------------------------------
-    fig_3d, axes_3d = plt.subplots(2, 3, figsize=(20, 12),
-                                    subplot_kw={"projection": "3d"})
+    fig_3d, axes_3d = plt.subplots(
+        1, n_cases, figsize=(6.5 * n_cases, 6),
+        subplot_kw={"projection": "3d"}, squeeze=False
+    )
     ds = 10  # downsample factor
     for i, (r, ax) in enumerate(zip(all_results, axes_3d.flat)):
         ref = r["ref_xyz"]
@@ -681,7 +714,9 @@ def main():
     # ---------------------------------------------------------------
     # PLOT 4: Position error magnitude over time
     # ---------------------------------------------------------------
-    fig_err, axes_err = plt.subplots(2, 3, figsize=(18, 9))
+    fig_err, axes_err = plt.subplots(
+        1, n_cases, figsize=(6 * n_cases, 4.8), squeeze=False
+    )
     for i, (r, ax) in enumerate(zip(all_results, axes_err.flat)):
         ref = r["ref_xyz"]
         t   = r["t_ref"]
@@ -698,6 +733,8 @@ def main():
         ax.grid(True, alpha=0.3)
         if i == 0:
             ax.legend(fontsize=9)
+    for ax in axes_err.flat[len(all_results):]:
+        ax.set_axis_off()
     fig_err.suptitle("Position Error Magnitude Over Time", fontsize=14, fontweight="bold")
     plt.tight_layout()
 
