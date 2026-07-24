@@ -52,10 +52,10 @@ class quad_sim:
         pos_p=(1.0, 1.0, 2.0),
         vel_p=(3.0, 3.0, 5.0),
         vel_i=(0.08, 0.08, 1.0),
-        att_p=(3.5, 3.5, 2.8),
+        att_p=(5.0, 5.0, 3.2),
         # PX4 rate gains are normalized actuator gains; this simulator's
         # rate_p outputs torque directly, so use a 2.5x torque-unit conversion.
-        rate_p=(0.35, 0.35, 0.26879),
+        rate_p=(0.45, 0.45, 0.32),
         rate_sp_max=(np.deg2rad(220.0), np.deg2rad(220.0), np.deg2rad(200.0)),
         vel_sp_max_xy=15.0,
         vel_sp_max_z=15.0,
@@ -69,7 +69,7 @@ class quad_sim:
 
     # Time setup
     dt = 0.01
-    time = np.arange(0.0, 35.0, dt)
+    time = np.arange(0.0, 45.0, dt)
 
     def fct_unwrap_trajectory_yaw(self, traj):
         yaws = np.unwrap([r["yaw"] for r in traj])
@@ -248,7 +248,7 @@ class quad_sim:
             sigma, sigma_dot, sigma_ddot = self.fct_smooth_time_scaling(tau, T)
 
             # ---- base planar figure-8 (XY plane) ----
-            s    = 2.0 * np.pi * n_loops * sigma
+            s    = 2.0 * np.pi * n_loops * sigma - 0.25 * np.pi
             s_dot = 2.0 * np.pi * n_loops * sigma_dot
             s_ddot = 2.0 * np.pi * n_loops * sigma_ddot
             sin_s = np.sin(s)
@@ -319,6 +319,99 @@ class quad_sim:
 
         return self.fct_unwrap_trajectory_yaw(traj)
 
+    def fct_make_lissajous_trajectory(self, time,
+                                      center=(0.0, 0.0, 0.0),
+                                      ax=2.0,
+                                      ay=2.0,
+                                      az=1.0,
+                                      fx=1.0,
+                                      fy=2.0,
+                                      fz=3.0,
+                                      phase_y=np.pi / 2.0,
+                                      phase_z=np.pi / 4.0,
+                                      harmonic_scale=0.0,
+                                      harmonic_phase_x=0.0,
+                                      harmonic_phase_y=0.0,
+                                      yaw_follows_path=True,
+                                      yaw_constant=0.0):
+        """
+        Make a 3D Lissajous trajectory with smooth start/stop timing.
+
+        The curve is parameterized as:
+            x = ax * sin(fx*s)
+            y = ay * sin(fy*s + phase_y)
+            z = az * sin(fz*s + phase_z)
+
+        where s is smoothly swept from 0 to 2*pi over the simulation.
+        """
+        time = np.asarray(time, dtype=float)
+        t0 = float(time[0])
+        T = float(time[-1] - time[0])
+        if T <= 0.0:
+            raise ValueError("time array must span a positive duration")
+
+        cx, cy, cz = map(float, center)
+        traj = []
+
+        for t in time:
+            tau = (t - t0) / T
+            sigma, sigma_dot, sigma_ddot = self.fct_smooth_time_scaling(tau, T)
+
+            s = 2.0 * np.pi * sigma
+            s_dot = 2.0 * np.pi * sigma_dot
+            s_ddot = 2.0 * np.pi * sigma_ddot
+
+            sx = fx * s
+            sy = fy * s + phase_y
+            sz = fz * s + phase_z
+            sx2 = (fx + 1.0) * s + harmonic_phase_x
+            sy2 = (fy + 1.0) * s + harmonic_phase_y
+
+            x = cx + ax * (np.sin(sx) + harmonic_scale * np.sin(sx2))
+            y = cy + ay * (np.sin(sy) + harmonic_scale * np.sin(sy2))
+            z = cz + az * np.sin(sz)
+
+            vx = ax * (
+                fx * np.cos(sx)
+                + harmonic_scale * (fx + 1.0) * np.cos(sx2)
+            ) * s_dot
+            vy = ay * (
+                fy * np.cos(sy)
+                + harmonic_scale * (fy + 1.0) * np.cos(sy2)
+            ) * s_dot
+            vz = az * fz * np.cos(sz) * s_dot
+
+            ax_w = ax * (
+                fx * np.cos(sx) * s_ddot
+                - fx**2 * np.sin(sx) * s_dot**2
+                + harmonic_scale * (fx + 1.0) * np.cos(sx2) * s_ddot
+                - harmonic_scale * (fx + 1.0)**2 * np.sin(sx2) * s_dot**2
+            )
+            ay_w = ay * (
+                fy * np.cos(sy) * s_ddot
+                - fy**2 * np.sin(sy) * s_dot**2
+                + harmonic_scale * (fy + 1.0) * np.cos(sy2) * s_ddot
+                - harmonic_scale * (fy + 1.0)**2 * np.sin(sy2) * s_dot**2
+            )
+            az_w = az * fz * (np.cos(sz) * s_ddot - fz * np.sin(sz) * s_dot**2)
+
+            if yaw_follows_path:
+                yaw = np.arctan2(vy, vx)
+                yaw_rate = (vx * ay_w - vy * ax_w) / (vx**2 + vy**2 + 1e-12)
+            else:
+                yaw = float(yaw_constant)
+                yaw_rate = 0.0
+
+            traj.append({
+                "pos": np.array([x, y, z], dtype=float),
+                "vel": np.array([vx, vy, vz], dtype=float),
+                "acc": np.array([ax_w, ay_w, az_w], dtype=float),
+                "yaw": float(yaw),
+                "yaw_rate": float(yaw_rate)
+            })
+
+        return self.fct_unwrap_trajectory_yaw(traj)
+
     def fct_run_simulation(self, traj, n):
         """
         Run n simulations using a single trajectory type.
@@ -330,6 +423,7 @@ class quad_sim:
 
         traj = 1  -> helical trajectory
         traj = 2  -> figure-8 trajectory
+        traj = 3  -> lissajous trajectory
 
         Each run gets different randomized trajectory parameters,
         but they are deterministic by run index. That means:
@@ -373,9 +467,9 @@ class quad_sim:
                 ref_traj = self.fct_make_helical_trajectory(
                     self.time,
                     center=(0.0, 0.0),
-                    radius=rng.uniform(1, 5),
+                    radius=rng.uniform(10.0, 15.0),
                     z_start=0.0,
-                    z_end=rng.uniform(5, 10),
+                    z_end=rng.uniform(20.0, 30.0),
                     n_turns=1,
                     yaw_follows_path=True
                 )
@@ -385,15 +479,40 @@ class quad_sim:
                 ref_traj = self.fct_make_figure8_trajectory(
                     self.time,
                     center=(0.0, 0.0, 0.0),
-                    a=rng.uniform(1, 5),
-                    b=rng.uniform(1, 5),
+                    a=rng.uniform(10.0, 15.0),
+                    b=rng.uniform(30.0, 40.0),
                     n_loops=1,
-                    tilt_deg=rng.uniform(10, 80),
+                    tilt_deg=rng.uniform(38.0, 52.0),
+                    yaw_follows_path=True
+                )
+
+            elif traj == 3:
+                fx = 1.0
+                fy = 2.0
+                fz = 1.0
+                ax_amp = rng.uniform(10.0, 14.0)
+                ay_amp = rng.uniform(10.0, 14.0)
+                az_amp = rng.uniform(10.0, 14.0)
+
+                ref_traj = self.fct_make_lissajous_trajectory(
+                    self.time,
+                    center=(0.0, 0.0, rng.uniform(15.0, 20.0)),
+                    ax=ax_amp,
+                    ay=ay_amp,
+                    az=az_amp,
+                    fx=fx,
+                    fy=fy,
+                    fz=fz,
+                    phase_y=rng.uniform(0.15 * np.pi, 0.85 * np.pi),
+                    phase_z=-0.5 * np.pi,
+                    harmonic_scale=rng.uniform(0.025, 0.04),
+                    harmonic_phase_x=rng.uniform(0.0, 2.0 * np.pi),
+                    harmonic_phase_y=rng.uniform(0.0, 2.0 * np.pi),
                     yaw_follows_path=True
                 )
 
             else:
-                raise ValueError("traj must be 1 or 2")
+                raise ValueError("traj must be 1, 2, or 3")
 
             # =====================================================
             # Shift trajectory so it starts at (0,0,0)

@@ -24,7 +24,7 @@ def set_axes_equal(ax):
 
     ax.set_xlim3d([x_mid - radius, x_mid + radius])
     ax.set_ylim3d([y_mid - radius, y_mid + radius])
-    ax.set_zlim3d([max(0.0, z_mid - radius), z_mid + radius])
+    ax.set_zlim3d([z_mid - radius, z_mid + radius])
 
 
 def body_points(position, phi, theta, psi, arm_length):
@@ -47,7 +47,56 @@ def body_points(position, phi, theta, psi, arm_length):
     return position + local_points @ rotation.T
 
 
+def reference_attitude_from_trajectory(sim, ref_traj):
+    ref_phi = np.zeros(len(ref_traj))
+    ref_theta = np.zeros(len(ref_traj))
+    ref_psi = np.unwrap([r["yaw"] for r in ref_traj])
+
+    for k, ref in enumerate(ref_traj):
+        acc = np.asarray(ref.get("acc", np.zeros(3)), dtype=float)
+        force_world = sim.q_mass * (acc + np.array([0.0, 0.0, sim.g]))
+        R_des = helperfcts.fct_desired_rotation_from_force_and_yaw(force_world, ref_psi[k])
+        ref_phi[k], ref_theta[k], _ = helperfcts.fct_euler_from_R(R_des)
+
+    return ref_phi, ref_theta, ref_psi
+
+
+def plot_attitude_tracking(t, states, ref_traj, sim, traj_label, save_path):
+    ref_phi, ref_theta, ref_psi = reference_attitude_from_trajectory(sim, ref_traj)
+    actual_phi = states[:, 6]
+    actual_theta = states[:, 7]
+    actual_psi = np.unwrap(states[:, 8])
+
+    actual = [actual_phi, actual_theta, actual_psi]
+    reference = [ref_phi, ref_theta, ref_psi]
+    labels = ["Roll phi [rad]", "Pitch theta [rad]", "Yaw psi [rad]"]
+
+    fig_att, axes = plt.subplots(3, 1, figsize=(12, 8), sharex=True)
+    for ax, y_actual, y_ref, label in zip(axes, actual, reference, labels):
+        rms = float(np.sqrt(np.mean((y_actual - y_ref) ** 2)))
+        ax.plot(t, y_ref, color="#ff7f0e", linewidth=1.8, label="reference")
+        ax.plot(t, y_actual, color="#1f77b4", linewidth=1.3, label=f"actual (RMS {rms:.4f})")
+        ax.set_ylabel(label)
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="upper right")
+
+    axes[-1].set_xlabel("Time [s]")
+    fig_att.suptitle(f"{traj_label}: roll, pitch, yaw tracking")
+    fig_att.tight_layout()
+
+    if save_path:
+        root = save_path.rsplit(".", 1)[0] if "." in save_path else save_path
+        attitude_path = f"{root}_attitude.png"
+        fig_att.savefig(attitude_path, dpi=160)
+        print(f"Saved attitude plot to {attitude_path}")
+
+
 def run_visualization(traj_id, duration, playback_speed, stride, save_path):
+    traj_names = {
+        1: "helix",
+        2: "figure-8",
+        3: "lissajous",
+    }
     sim = quad_sim()
     if duration is not None:
         sim.time = np.arange(0.0, duration, sim.dt)
@@ -60,6 +109,7 @@ def run_visualization(traj_id, duration, playback_speed, stride, save_path):
     ref_pos = np.array([r["pos"] for r in ref_traj], dtype=float)
     ref_yaw = np.array([r["yaw"] for r in ref_traj], dtype=float)
     ref_vel = np.array([r["vel"] for r in ref_traj], dtype=float)
+    traj_label = f"Trajectory {traj_id} ({traj_names.get(traj_id, 'unknown')})"
 
     frame_idx = np.arange(0, len(t), stride)
     interval_ms = max(1, int(1000.0 * sim.dt * stride / playback_speed))
@@ -122,7 +172,7 @@ def run_visualization(traj_id, duration, playback_speed, stride, save_path):
         yaw_error = helperfcts.wrap_angle(psi - ref_yaw[k])
         speed_xy = np.linalg.norm(ref_vel[k, 0:2])
         title.set_text(
-            f"Trajectory {traj_id} | t={t[k]:.2f}s | "
+            f"{traj_label} | t={t[k]:.2f}s | "
             f"yaw={psi:.2f} rad | ref={ref_yaw[k]:.2f} rad | error={yaw_error:.2f} rad | u4={controls[k, 3]:.4f}"
             f" | ref speed xy={speed_xy:.2f} m/s"
         )
@@ -136,6 +186,7 @@ def run_visualization(traj_id, duration, playback_speed, stride, save_path):
         blit=False,
         repeat=True,
     )
+    plot_attitude_tracking(t, states, ref_traj, sim, traj_label, save_path)
 
     if save_path:
         animation.save(save_path, dpi=140)
@@ -146,7 +197,7 @@ def run_visualization(traj_id, duration, playback_speed, stride, save_path):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Visualize the quadcopter trajectory and yaw tracking in 3D.")
-    parser.add_argument("--traj", type=int, default=2, choices=[1, 2], help="1 for helix, 2 for figure-8.")
+    parser.add_argument("--traj", type=int, default=2, choices=[1, 2, 3], help="1 for helix, 2 for figure-8, 3 for lissajous.")
     parser.add_argument("--duration", type=float, default=None, help="Optional simulation duration in seconds. Defaults to quad_sim.time.")
     parser.add_argument("--speed", type=float, default=2.0, help="Playback speed multiplier.")
     parser.add_argument("--stride", type=int, default=5, help="Use every Nth simulation sample for animation.")
