@@ -7,24 +7,31 @@ from Closed_loop import ClosedLoopQuad
 class quad_sim:
     
     # Simulation Parameters
-    q_mass = 0.5 # kg
-    g = 9.81 # m/s
-    q_l = 0.2 # m
-    kD = 1e-7
-    kT = 3e-5
-    k_drag_linear = 0.5
-    k_drag_angular = 0.02
-    Ixx, Iyy, Izz = 5e-3, 5e-3, 9e-3
+    q_mass = 3.33819 # kg
+    g = 9.80665 # m/s^2
+    q_l = 0.28881 # m
+    kD = 4.8e-7 # aerodynamic drag/yaw torque factor
+    kT = 3.44e-5 # N/(rad/s)^2
+
+    # Drag estimates for a 5.5 inch cube center body.
+    # Assumptions: rho=1.225 kg/m^3, Cd~=1.05 for a cube, linearized at
+    # v_ref=15 m/s and omega_ref=220 deg/s to match this simulator's
+    # F=-k*v and tau=-k*omega damping model.
+    cube_side = 5.5 * 0.0254 # m
+    k_drag_linear = 0.18826928071875 # kg/s
+    k_drag_angular = 6.569729303413257e-5 # N*m*s/rad
+
+    Ixx, Iyy, Izz = 0.04164, 0.03963, 0.04758
     I = np.diag([Ixx, Iyy, Izz])
 
     kp_pos = [2.0, 2.0, 15.] #[x,y,z]
     ki_pos = [0.2, 0.2, 5.] #[x,y,z]
     kd_pos = [3.2, 3.2, 15.] #[x,y,z]
-    kp_ang = [6.9, 6.9, 50.] #[phi,theta,psi]
+    kp_ang = [6.5, 6.5, 2.8] #[phi,theta,psi]
     ki_ang = [0.1, 0.1, 0.1] #[phi,theta,psi]
     kd_ang = [3.7, 3.7, 5.] #[phi,theta,psi]
 
-    max_speed = 400.0
+    max_speed = 16380.0 * 2.0 * np.pi / 60.0 # rad/s
 
     quad = quadcopter(q_mass, g, q_l, I, kD, kT, k_drag_linear, k_drag_angular, prop_efficiency=[1.0, 1.0, 1.0, 1.0])
 
@@ -33,27 +40,30 @@ class quad_sim:
         kp_pos, ki_pos, kd_pos,
         kp_ang, ki_ang, kd_ang,
         max_speed=max_speed,
-        a_xy_max=2.0,
-        a_z_max=4.0,
+        a_xy_max=10.0,
+        a_z_max=10.0,
         tilt_max_deg=45.0,
-        torque_roll_pitch_max=0.10)
+        torque_roll_pitch_max=1.10,
+        yaw_tau_max=1.19)
 
     controller_PX4 = QuadPX4LikeController(
         quad,
         max_speed=max_speed,
-        pos_p=(2.2, 2.2, 2.0),
-        vel_p=(5.0, 5.0, 5.0),
+        pos_p=(1.0, 1.0, 2.0),
+        vel_p=(3.0, 3.0, 5.0),
         vel_i=(0.08, 0.08, 1.0),
-        att_p=(11.0, 11.0, 10.0),
-        rate_p=(0.12, 0.12, 0.03),
-        rate_sp_max=(4.0, 4.0, 1.1),
-        vel_sp_max_xy=4.0,
-        vel_sp_max_z=3.0,
-        acc_max_xy=5.0,
-        acc_max_z=5.0,
+        att_p=(3.5, 3.5, 2.8),
+        # PX4 rate gains are normalized actuator gains; this simulator's
+        # rate_p outputs torque directly, so use a 2.5x torque-unit conversion.
+        rate_p=(0.35, 0.35, 0.26879),
+        rate_sp_max=(np.deg2rad(220.0), np.deg2rad(220.0), np.deg2rad(200.0)),
+        vel_sp_max_xy=15.0,
+        vel_sp_max_z=15.0,
+        acc_max_xy=10.0,
+        acc_max_z=10.0,
         tilt_max_deg=45.0,
-        thrust_max=12.0,
-        torque_max=(0.12, 0.12, 0.02))
+        thrust_max=q_mass * (g + 10.0),
+        torque_max=(1.14, 1.09, 1.19))
 
     sim_PID = ClosedLoopQuad(quad, controller_PX4)
 
@@ -68,9 +78,34 @@ class quad_sim:
         return traj
 
     def fct_smooth_time_scaling(self, tau, T):
-        sigma = 10.0 * tau**3 - 15.0 * tau**4 + 6.0 * tau**5
-        sigma_dot = (30.0 * tau**2 - 60.0 * tau**3 + 30.0 * tau**4) / T
-        sigma_ddot = (60.0 * tau - 180.0 * tau**2 + 120.0 * tau**3) / T**2
+        ramp_fraction = 0.3
+        r = ramp_fraction
+        cruise_scale = 1.0 / (1.0 - r)
+
+        def ramp_distance(xi):
+            return xi**3 - 0.5 * xi**4
+
+        def ramp_speed(xi):
+            return 3.0 * xi**2 - 2.0 * xi**3
+
+        def ramp_accel(xi):
+            return 6.0 * xi - 6.0 * xi**2
+
+        if tau < r:
+            xi = tau / r
+            sigma = cruise_scale * r * ramp_distance(xi)
+            sigma_dot = cruise_scale * ramp_speed(xi) / T
+            sigma_ddot = cruise_scale * ramp_accel(xi) / (r * T**2)
+        elif tau > 1.0 - r:
+            tau_remaining = 1.0 - tau
+            xi = tau_remaining / r
+            sigma = 1.0 - cruise_scale * r * ramp_distance(xi)
+            sigma_dot = cruise_scale * ramp_speed(xi) / T
+            sigma_ddot = -cruise_scale * ramp_accel(xi) / (r * T**2)
+        else:
+            sigma = cruise_scale * (0.5 * r + tau - r)
+            sigma_dot = cruise_scale / T
+            sigma_ddot = 0.0
         return sigma, sigma_dot, sigma_ddot
 
     def fct_make_helical_trajectory(self, time,
