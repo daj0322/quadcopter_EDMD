@@ -255,31 +255,39 @@ N_MPC  = 20
 NC_MPC = 15
 
 Q_DIAG = np.array([
-    400000.0, 640000.0, 400000.0,
-        50.0,     80.0,     50.0,
-         0.0,      0.0,  20000.0,
-         0.0,      0.0,   3000.0,
+    300000.0, 480000.0, 300000.0,
+        25.0,     40.0,     25.0,
+         0.0,      0.0,      0.0,
+         0.0,      0.0,      0.0,
 ], dtype=float)
 
-R_DIAG  = np.array([2.5e-05, 0.5, 0.5], dtype=float)
-RD_DIAG = np.array([2.5e-06, 0.05, 0.05], dtype=float)
+R_DIAG  = np.array([0.0001, 0.75, 0.75], dtype=float)
+RD_DIAG = np.array([1e-05, 0.075, 0.075], dtype=float)
 R_YAW   = 0.25
 RD_YAW  = 0.025
-DU_YAW  = 0.005
+DU_YAW  = 0.0
+```
+
+Correction bounds are intentionally small for the fixed-yaw model:
+
+```python
+DU_MIN = np.array([-0.1, -0.01, -0.01], dtype=float)
+DU_MAX = np.array([ 0.1,  0.01,  0.01], dtype=float)
 ```
 
 Other active settings:
 
 ```python
 USE_PID_NOMINAL = True
-EDMDC_YAW_CORRECTION = True
+EDMDC_YAW_CORRECTION = False
 USE_CONSTANT_YAW_REFERENCE = True
 ```
 
 Important behavior:
 
 - EDMDc computes corrections around the nominal cascaded PID attitude command.
-- EDMDc is allowed to adjust yaw through `psi_des`.
+- EDMDc does not optimize a yaw-command correction in the fixed-yaw comparison.
+- The inner yaw PID still controls yaw by tracking the nominal `psi_des=0` command.
 - Constant-yaw reference override is on for the target comparisons.
 - Full 100-second trajectories are used.
 
@@ -324,7 +332,7 @@ helix, figure-8, lissajous
 - `DU_YAW_FIXED` is:
 
 ```python
-DU_YAW_FIXED = 0.005
+DU_YAW_FIXED = 0.0
 ```
 
 - Full validation now runs the full 10000-step trajectory:
@@ -341,20 +349,24 @@ FINAL_VALIDATION_STEPS = 10000
 SCORE_PID_RMSE_FLOOR = 0.5
 ```
 
-- The final score is normalized position error plus yaw/r penalties.
+- The final score is normalized position error plus yaw/r penalties, but the
+  fixed-yaw MPC objective itself does not weight yaw/r states.
 - The script prints a block that can be pasted into `compare_three.py` and `final_comparison.py`.
 
-## Most Recent MPC Tuning Result
+## Most Recent Fixed-Yaw MPC Status
 
-The latest focused full-validation run in `tunerfull.py` tested 18 MPC blocks on the full 10000-step trajectories. The selected block above gave:
+After the fixed-yaw retraining, the EDMDc short-horizon gate passed cleanly:
 
 ```text
-helix (small): EDMDc=1.0009 m
-figure-8:      EDMDc=1.8388 m
-lissajous:     EDMDc=10.1287 m
+helix:     rolling-pos=0.0141 m, yaw=0.0005 rad, r=0.0129 rad/s
+figure-8:  rolling-pos=0.0089 m, yaw=0.0009 rad, r=0.0135 rad/s
+lissajous: rolling-pos=0.0403 m, yaw=0.0016 rad, r=0.0167 rad/s
 ```
 
-This improves the previous active block on all three target trajectories, but lissajous is still the weak case.
+The first fixed-yaw closed-loop comparison with yaw/r heavily weighted in the
+outer MPC objective made EDMDc drift. The active code now removes yaw/r from
+the outer MPC objective and locks the EDMDc yaw-command correction to zero,
+while the inner yaw PID still controls the plant yaw.
 
 ## Notes
 

@@ -35,13 +35,13 @@ TOP_K      = 5
 FINAL_TOP_K = 5
 MAX_WORKERS = 8
 
-DU_MIN_FIXED = np.array([-0.5, -0.05, -0.05], dtype=float)
-DU_MAX_FIXED = np.array([ 0.5,  0.05,  0.05], dtype=float)
-DU_YAW_FIXED = 0.005
+DU_MIN_FIXED = np.array([-0.1, -0.01, -0.01], dtype=float)
+DU_MAX_FIXED = np.array([ 0.1,  0.01,  0.01], dtype=float)
+DU_YAW_FIXED = 0.0
 Q_Y_MULT_FIXED = 1.6
 Q_VY_MULT_FIXED = 1.6
-Q_YAW_FIXED = 20000.0
-Q_R_FIXED = 3000.0
+Q_YAW_FIXED = 0.0
+Q_R_FIXED = 0.0
 YAW_R_FIXED = 0.25
 YAW_RD_FIXED = 0.025
 SCORE_YAW_WEIGHT = 0.25

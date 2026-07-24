@@ -62,14 +62,14 @@ N_MPC   = 20
 NC_MPC  = 15
 
 Q_DIAG = np.array([
-    400000.0, 640000.0, 400000.0,
-        50.0,     80.0,     50.0,
-         0.0,      0.0,  20000.0,
-         0.0,      0.0,   3000.0,
+    300000.0, 480000.0, 300000.0,
+        25.0,     40.0,     25.0,
+         0.0,      0.0,      0.0,
+         0.0,      0.0,      0.0,
 ], dtype=float)
 
-R_DIAG  = np.array([2.5e-05, 0.5, 0.5], dtype=float)
-RD_DIAG = np.array([2.5e-06, 0.05, 0.05], dtype=float)
+R_DIAG  = np.array([0.0001, 0.75, 0.75], dtype=float)
+RD_DIAG = np.array([1e-05, 0.075, 0.075], dtype=float)
 R_YAW   = 0.25
 RD_YAW  = 0.025
 '''
@@ -89,13 +89,17 @@ RD_DIAG = np.array([0.0001, 0.025, 0.025], dtype=float)
 '''
 
 USE_PID_NOMINAL = True
-EDMDC_YAW_CORRECTION = True
+# Fixed-yaw experiment: yaw remains controlled by the inner yaw PID, but the
+# outer EDMDc QP does not optimize a separate yaw-command correction. This
+# mirrors the paper's fixed-yaw 10-state objective while keeping the 12-state
+# plant and logged yaw/r states.
+EDMDC_YAW_CORRECTION = False
 USE_CONSTANT_YAW_REFERENCE = True
 CONSTANT_YAW = 0.0
 
-DU_MIN = np.array([-0.5, -0.05, -0.05], dtype=float)
-DU_MAX = np.array([ 0.5,  0.05,  0.05], dtype=float)
-DU_YAW = 0.005
+DU_MIN = np.array([-0.1, -0.01, -0.01], dtype=float)
+DU_MAX = np.array([ 0.1,  0.01,  0.01], dtype=float)
+DU_YAW = 0.0
 
 
 def apply_yaw_reference_mode(ref_traj):
