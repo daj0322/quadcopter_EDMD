@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 # Configuration
 SCRIPT_DIR = Path(__file__).resolve().parent
 dt = 0.01               # EDMD time step (s), 100 Hz
-SHORT_HORIZON_SECONDS = 2.0
+SHORT_HORIZON_SECONDS = 1.0
 MPC_HORIZON = int(round(SHORT_HORIZON_SECONDS / dt))
 ROLLING_WINDOW_STRIDE_SECONDS = 0.1
 SWEEP_ROLLING_WINDOW_STRIDE_SECONDS = 1.0
@@ -18,8 +18,11 @@ STATE_DIM = 12
 STATE_LABELS = ['x','y','z','vx','vy','vz','phi','theta','psi','p','q','r']
 RAW_INPUT_DIM = 4
 RAW_INPUT_LABELS = ["thrust", "tau_roll", "tau_pitch", "tau_yaw"]
-INPUT_LIFT_TYPE = "thrust_direction"
-INPUT_LIFT_LABELS = RAW_INPUT_LABELS + ["thrust_x", "thrust_y", "thrust_z"]
+INPUT_LIFT_TYPE = "thrust_direction_rate_coupling"
+INPUT_LIFT_LABELS = RAW_INPUT_LABELS + [
+    "thrust_x", "thrust_y", "thrust_z",
+    "tau_roll_p", "tau_pitch_q", "tau_yaw_r",
+]
 DATA_FILE = SCRIPT_DIR / "runs_mixed_n150.pkl"
 MODEL_FILE = SCRIPT_DIR / "edmdc_model_yaw_wrench.pkl"
 
@@ -47,12 +50,18 @@ EARLY_TRANSIENT_STEPS = int(round(EARLY_TRANSIENT_SECONDS / dt))
 ENFORCE_KINEMATIC_ROWS = True
 
 # Tikhonov regularization candidates
-LAMBDA_CANDIDATES = [1e-2, 1e-1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0]
+LAMBDA_CANDIDATES = [
+    0.0, 1e-3, 1e-2, 5e-2, 1e-1,
+    0.2, 0.3, 0.5, 0.75, 1.0,
+    1.5, 2.0, 2.5, 3.0, 4.0, 5.0,
+    7.5, 10.0, 20.0, 30.0, 50.0, 100.0,
+]
 
 # The figures show a single free rollout from the start of each held-out
 # trajectory. Include that exact plot error in lambda selection so the chosen
 # model looks good in the diagnostic plots, not only in averaged rolling RMSE.
-FIRST_ROLLOUT_SCORE_WEIGHT = 2.0
+FIRST_ROLLOUT_SCORE_WEIGHT = 1.0
+WORST_ROLLOUT_SCORE_WEIGHT = 0.35
 PLOT_STATE_SCORE_WEIGHTS = np.array([
     1.5, 1.5, 0.3,   # x, y, z
     1.2, 1.2, 0.3,   # vx, vy, vz
@@ -137,7 +146,9 @@ def lift_inputs_from_phys(states_phys, raw_inputs):
     raw_4 = raw_2d[:, :RAW_INPUT_DIM]
     thrust = raw_4[:, :1]
     thrust_dir = thrust_direction_from_state_phys(states_2d)
-    lifted = np.hstack([raw_4, thrust * thrust_dir])
+    rates = states_2d[:, 9:12]
+    torque_rate = raw_4[:, 1:4] * rates
+    lifted = np.hstack([raw_4, thrust * thrust_dir, torque_rate])
     return lifted[0] if scalar else lifted
 
 
@@ -466,12 +477,16 @@ print("===================================")
 # ============================================================
 def enforce_kinematic_rows(A, B, scaler, dt):
     """Enforce exact standardized integrator rows for positions and angles."""
-    if not ENFORCE_KINEMATIC_ROWS:
-        return A, B
-
     A = A.copy()
     B = B.copy()
     bias_idx = A.shape[1] - 1
+
+    A[bias_idx, :] = 0.0
+    B[bias_idx, :] = 0.0
+    A[bias_idx, bias_idx] = 1.0
+
+    if not ENFORCE_KINEMATIC_ROWS:
+        return A, B
 
     for state_idx, rate_idx in [(0, 3), (1, 4), (2, 5),
                                 (6, 9), (7, 10), (8, 11)]:
@@ -658,17 +673,24 @@ for lam in LAMBDA_CANDIDATES:
 
     avg_roll_pos = total_roll_pos / len(test_indices)
     avg_plot_score = total_plot_score / len(test_indices)
-    score = avg_roll_pos + FIRST_ROLLOUT_SCORE_WEIGHT * avg_plot_score
+    worst_roll_pos = max(per_traj.values())
+    score = (
+        avg_roll_pos
+        + FIRST_ROLLOUT_SCORE_WEIGHT * avg_plot_score
+        + WORST_ROLLOUT_SCORE_WEIGHT * worst_roll_pos
+    )
     detail = "  ".join(f"{n}={v:.4f}" for n, v in per_traj.items())
     print(
         f"  lam={lam:.0e}  score={score:.4f}  "
-        f"roll_pos={avg_roll_pos:.4f}  plot_score={avg_plot_score:.4f}  "
+        f"roll_pos={avg_roll_pos:.4f}  worst={worst_roll_pos:.4f}  "
+        f"plot_score={avg_plot_score:.4f}  "
         f"{detail}"
     )
     sweep_rows.append({
         "lambda": lam,
         "score": score,
         "rolling_pos": avg_roll_pos,
+        "worst_roll_pos": worst_roll_pos,
         "plot_score": avg_plot_score,
     })
 
@@ -956,6 +978,7 @@ model_data = {
     "lambda_selection_rolling_pos": best_avg_roll_pos,
     "lambda_selection_plot_score": best_avg_plot_score,
     "first_rollout_score_weight": FIRST_ROLLOUT_SCORE_WEIGHT,
+    "worst_rollout_score_weight": WORST_ROLLOUT_SCORE_WEIGHT,
     "plot_state_score_weights": PLOT_STATE_SCORE_WEIGHTS,
     "short_horizon_seconds": SHORT_HORIZON_SECONDS,
     "short_horizon_steps": h,

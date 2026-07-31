@@ -12,8 +12,13 @@ STATE_LABELS = ["x", "y", "z", "vx", "vy", "vz", "phi", "theta", "psi", "p", "q"
 REDUCED_10_INDICES = [0, 1, 2, 3, 4, 5, 6, 7, 9, 10]
 RAW_INPUT_DIM = 4
 RAW_INPUT_LABELS = ["thrust", "tau_roll", "tau_pitch", "tau_yaw"]
-INPUT_LIFT_TYPE = "thrust_direction"
-INPUT_LIFT_LABELS = RAW_INPUT_LABELS + ["thrust_x", "thrust_y", "thrust_z"]
+INPUT_LIFT_TYPE = "thrust_direction_rate_coupling"
+LEGACY_INPUT_LIFT_TYPE = "thrust_direction"
+INPUT_LIFT_LABELS = RAW_INPUT_LABELS + [
+    "thrust_x", "thrust_y", "thrust_z",
+    "tau_roll_p", "tau_pitch_q", "tau_yaw_r",
+]
+LEGACY_INPUT_LIFT_LABELS = RAW_INPUT_LABELS + ["thrust_x", "thrust_y", "thrust_z"]
 
 
 def thrust_direction_from_state_phys(states_phys):
@@ -70,12 +75,18 @@ def lift_inputs_from_phys(states_phys, raw_inputs):
     raw_4 = raw_2d[:, :RAW_INPUT_DIM]
     thrust = raw_4[:, :1]
     thrust_dir = thrust_direction_from_state_phys(states_2d)
-    lifted = np.hstack([raw_4, thrust * thrust_dir])
+    lifted_parts = [raw_4, thrust * thrust_dir]
+    if raw_2d.shape[1] >= RAW_INPUT_DIM:
+        rates = states_2d[:, 9:12]
+        lifted_parts.append(raw_4[:, 1:4] * rates)
+    lifted = np.hstack(lifted_parts)
     return lifted[0] if scalar else lifted
 
 
 def scaled_lifted_input_from_phys(state_phys, raw_input, u_scaler):
     lifted = lift_inputs_from_phys(state_phys, raw_input)
+    expected = int(getattr(u_scaler, "n_features_in_", np.asarray(lifted).shape[-1]))
+    lifted = np.asarray(lifted, dtype=float)[..., :expected]
     return u_scaler.transform(np.atleast_2d(lifted)).flatten()
 
 
@@ -287,13 +298,18 @@ class EDMDcMPC_QP:
     """
     def __init__(self, A, B, Cz, N, NC, Q, R, Rd,
                  u_scaler, du_min, du_max, u_nominal_raw,
-                 state_scaler=None, input_lift_type=None, raw_input_dim=None):
+                 state_scaler=None, input_lift_type=None, raw_input_dim=None,
+                 Q_terminal=None):
         self.A  = np.asarray(A, dtype=float)
         self.B_model = np.asarray(B, dtype=float)
         self.Cz = np.asarray(Cz, dtype=float)
         self.N  = int(N)
         self.NC = int(NC)
         self.Q  = np.asarray(Q,  dtype=float)
+        self.Q_terminal = (
+            np.asarray(Q_terminal, dtype=float)
+            if Q_terminal is not None else self.Q
+        )
         self.R  = np.asarray(R,  dtype=float)
         self.Rd = np.asarray(Rd, dtype=float)
 
@@ -309,8 +325,8 @@ class EDMDcMPC_QP:
         self.model_nu = self.B_model.shape[1]
         nominal_input_size = np.asarray(u_nominal_raw, dtype=float).size
         self.uses_lifted_input = (
-            self.input_lift_type == INPUT_LIFT_TYPE
-            or (self.model_nu == len(INPUT_LIFT_LABELS)
+            self.input_lift_type in (INPUT_LIFT_TYPE, LEGACY_INPUT_LIFT_TYPE)
+            or (self.model_nu in (len(INPUT_LIFT_LABELS), len(LEGACY_INPUT_LIFT_LABELS))
                 and getattr(self.u_scaler, "n_features_in_", self.model_nu) == self.model_nu
                 and (raw_input_dim == RAW_INPUT_DIM or nominal_input_size == RAW_INPUT_DIM))
         )
@@ -336,8 +352,9 @@ class EDMDcMPC_QP:
         self._set_nominal_input(u_nominal_raw)
         self._du_prev = np.zeros(self.nvar)
 
-        self.Qbar = sp.block_diag(
-            [sp.csc_matrix(self.Q) for _ in range(self.N)], format="csc")
+        q_blocks = [sp.csc_matrix(self.Q) for _ in range(max(self.N - 1, 0))]
+        q_blocks.append(sp.csc_matrix(self.Q_terminal))
+        self.Qbar = sp.block_diag(q_blocks, format="csc")
         self.Rbar = sp.block_diag(
             [sp.csc_matrix(self.R) for _ in range(self.NC)], format="csc")
         self.D    = self._build_difference_matrix()
@@ -389,10 +406,10 @@ class EDMDcMPC_QP:
         """
         Map raw standardized command deltas to lifted standardized input deltas.
 
-        The learned model input is
-        [thrust, tau_roll, tau_pitch, tau_yaw, thrust*dir_x, thrust*dir_y, thrust*dir_z].
-        The QP still optimizes the 4 real commands, so the three extra columns
-        need the local thrust-direction sensitivity.
+        The learned model input starts with raw commands, then may include
+        thrust-direction and torque-rate coupling channels. The QP still
+        optimizes the 4 real commands, so lifted columns need local
+        state-dependent sensitivities.
         """
         if not self.uses_lifted_input:
             return np.eye(self.model_nu)
@@ -404,8 +421,21 @@ class EDMDcMPC_QP:
         thrust_scale = self.u_scaler.scale_[0]
         for axis in range(3):
             lifted_idx = RAW_INPUT_DIM + axis
+            if lifted_idx >= self.model_nu:
+                continue
             J[lifted_idx, 0] = (
                 thrust_scale * thrust_dir[axis] / self.u_scaler.scale_[lifted_idx]
+            )
+        rate_start = RAW_INPUT_DIM + 3
+        rates = self._lift_state_phys[9:12]
+        for axis in range(3):
+            lifted_idx = rate_start + axis
+            raw_idx = 1 + axis
+            if lifted_idx >= self.model_nu or raw_idx >= self.nu:
+                continue
+            J[lifted_idx, raw_idx] = (
+                self.u_scaler.scale_[raw_idx] * rates[axis]
+                / self.u_scaler.scale_[lifted_idx]
             )
         return J
 

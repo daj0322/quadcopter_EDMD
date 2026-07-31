@@ -39,8 +39,12 @@ DATA_FILE = SCRIPT_DIR / "runs_mixed_n150.pkl"
 MODEL_FILE = SCRIPT_DIR / "edmdc_model_yaw_wrench.pkl"
 TEST_CASES = [(39, "helix"), (59, "figure-8"), (129, "lissajous")]
 
-N_MPC = 25
+USE_PID_NOMINAL = True
+
+N_MPC = 30
 NC_MPC = 10
+LEGACY_N_MPC = 18
+LEGACY_NC_MPC = 6
 
 Q_DIAG = np.array([
     45.0, 45.0, 55.0,
@@ -48,11 +52,21 @@ Q_DIAG = np.array([
     0.2, 0.2, 4.0,
     0.05, 0.05, 1.0,
 ], dtype=float)
-R_DIAG = np.array([0.03, 1.2, 1.2, 0.7], dtype=float)
-RD_DIAG = np.array([0.01, 0.35, 0.35, 0.25], dtype=float)
+R_DIAG = np.array([0.12, 1.2, 1.2, 0.8], dtype=float)
+RD_DIAG = np.array([0.04, 0.35, 0.35, 0.25], dtype=float)
+Q_TERMINAL_SCALE = 3.0
+EDMD_CORRECTION_BLEND = 0.25
+LINEAR_CORRECTION_BLEND = 1.0
+LEGACY_R_DIAG = np.array([0.25, 5.0, 5.0, 3.0], dtype=float)
+LEGACY_RD_DIAG = np.array([0.12, 1.5, 1.5, 1.0], dtype=float)
+LEGACY_Q_TERMINAL_SCALE = 1.0
+LEGACY_EDMD_CORRECTION_BLEND = 1.0
+LEGACY_LINEAR_CORRECTION_BLEND = 1.0
 
-DU_MIN = np.array([-2.0, -0.18, -0.18, -0.18], dtype=float)
-DU_MAX = np.array([2.0, 0.18, 0.18, 0.18], dtype=float)
+DU_RAW_MAX = np.array([2.0, 0.18, 0.18, 0.18], dtype=float)
+LEGACY_DU_SCALED_MAX = np.array([0.7, 0.06, 0.06, 0.06], dtype=float)
+DU_MIN = -LEGACY_DU_SCALED_MAX
+DU_MAX = LEGACY_DU_SCALED_MAX
 
 
 class InputScalerView:
@@ -68,6 +82,34 @@ class InputScalerView:
     def inverse_transform(self, values):
         values = np.asarray(values, dtype=float)
         return values * self.scale_ + self.mean_
+
+
+def scaled_delta_bounds(u_scaler, raw_delta_max):
+    raw_delta_max = np.asarray(raw_delta_max, dtype=float)
+    scales = np.asarray(u_scaler.scale_[:raw_delta_max.size], dtype=float)
+    scaled = raw_delta_max / scales
+    return -scaled, scaled
+
+
+def edmd_mpc_matrices(model):
+    A = np.asarray(model["A"], dtype=float).copy()
+    B = np.asarray(model["B"], dtype=float).copy()
+    bias_idx = A.shape[0] - 1
+    A[bias_idx, :] = 0.0
+    B[bias_idx, :] = 0.0
+    A[bias_idx, bias_idx] = 1.0
+    return A, B
+
+
+def controller_nominal_wrench(sim, state, ref, nominal_controller, use_pid_nominal):
+    if use_pid_nominal:
+        _, u_nom = nominal_controller.fct_step(state, ref, sim.dt)
+        return clamp_wrench(sim, u_nom)
+
+    acc_ref = np.asarray(ref.get("acc", np.zeros(3)), dtype=float)
+    force_world = sim.q_mass * (acc_ref + np.array([0.0, 0.0, sim.g]))
+    thrust_nom = np.linalg.norm(force_world)
+    return clamp_wrench(sim, np.array([thrust_nom, 0.0, 0.0, 0.0], dtype=float))
 
 
 def clamp_wrench(sim, u):
@@ -93,33 +135,52 @@ def plant_step(sim, state, u, dt):
     return sol.y[:, -1], u
 
 
-def build_edmd_mpc(model, sim):
+def build_edmd_mpc(model, sim, legacy_pid_nominal=False):
     n_obs = model["n_obs"]
     Cz = np.zeros((STATE_DIM, n_obs))
     Cz[:STATE_DIM, :STATE_DIM] = np.eye(STATE_DIM)
     hover = np.array([sim.q_mass * sim.g, 0.0, 0.0, 0.0], dtype=float)
+    A_mpc, B_mpc = edmd_mpc_matrices(model)
+    if legacy_pid_nominal:
+        du_min, du_max = -LEGACY_DU_SCALED_MAX, LEGACY_DU_SCALED_MAX
+    else:
+        du_min, du_max = scaled_delta_bounds(model["u_scaler"], DU_RAW_MAX)
     return EDMDcMPC_QP(
-        A=model["A"], B=model["B"], Cz=Cz,
+        A=A_mpc, B=B_mpc, Cz=Cz,
         N=N_MPC, NC=NC_MPC,
         Q=np.diag(Q_DIAG), R=np.diag(R_DIAG), Rd=np.diag(RD_DIAG),
         u_scaler=model["u_scaler"],
-        du_min=DU_MIN, du_max=DU_MAX,
+        du_min=du_min, du_max=du_max,
         u_nominal_raw=hover,
         state_scaler=model["scaler"],
         input_lift_type=model.get("input_lift_type"),
         raw_input_dim=int(model.get("raw_input_dim", 4)),
+        Q_terminal=np.diag(Q_TERMINAL_SCALE * Q_DIAG),
     )
 
 
-def build_linear_mpc(A_lin, B_lin, x_scaler, u_scaler, sim):
+def build_linear_mpc(A_lin, B_lin, c_lin, x_scaler, u_scaler, sim, legacy_pid_nominal=False):
     hover = np.array([sim.q_mass * sim.g, 0.0, 0.0, 0.0], dtype=float)
+    A_aug = np.eye(STATE_DIM + 1)
+    A_aug[:STATE_DIM, :STATE_DIM] = A_lin
+    A_aug[:STATE_DIM, STATE_DIM] = c_lin
+    A_aug[STATE_DIM, :STATE_DIM] = 0.0
+    B_aug = np.zeros((STATE_DIM + 1, 4))
+    B_aug[:STATE_DIM, :] = B_lin
+    Cz = np.zeros((STATE_DIM, STATE_DIM + 1))
+    Cz[:, :STATE_DIM] = np.eye(STATE_DIM)
+    if legacy_pid_nominal:
+        du_min, du_max = -LEGACY_DU_SCALED_MAX, LEGACY_DU_SCALED_MAX
+    else:
+        du_min, du_max = scaled_delta_bounds(u_scaler, DU_RAW_MAX)
     return EDMDcMPC_QP(
-        A=A_lin, B=B_lin, Cz=np.eye(STATE_DIM),
+        A=A_aug, B=B_aug, Cz=Cz,
         N=N_MPC, NC=NC_MPC,
         Q=np.diag(Q_DIAG), R=np.diag(R_DIAG), Rd=np.diag(RD_DIAG),
         u_scaler=u_scaler,
-        du_min=DU_MIN, du_max=DU_MAX,
+        du_min=du_min, du_max=du_max,
         u_nominal_raw=hover,
+        Q_terminal=np.diag(Q_TERMINAL_SCALE * Q_DIAG),
     )
 
 
@@ -144,7 +205,10 @@ def run_pid_baseline(sim, ref_traj, steps):
     return X, U
 
 
-def run_mpc_closed_loop(mpc, sim, ref_traj, state_scaler, nominal_controller, steps, label, lifted):
+def run_mpc_closed_loop(
+    mpc, sim, ref_traj, state_scaler, nominal_controller, steps, label,
+    lifted, use_pid_nominal=False, z_builder=None, correction_blend=1.0
+):
     ref_std = precompute_ref_std(ref_traj[:steps], state_scaler, dt=sim.dt)
     state = np.zeros(STATE_DIM)
     X = np.zeros((steps, STATE_DIM))
@@ -154,17 +218,21 @@ def run_mpc_closed_loop(mpc, sim, ref_traj, state_scaler, nominal_controller, st
     nominal_controller.fct_reset()
 
     for k in range(steps - 1):
-        if lifted:
+        if z_builder is not None:
+            z = z_builder(state, state_scaler)
+        elif lifted:
             z = lifted_state_from_x(state, state_scaler)
         else:
             z = state_scaler.transform(state.reshape(1, -1)).flatten()
         ref_h = build_ref_horizon(ref_std, k, N_MPC)
-        _, u_nom = nominal_controller.fct_step(state, ref_traj[k], sim.dt)
-        u_nom = clamp_wrench(sim, u_nom)
+        u_nom = controller_nominal_wrench(
+            sim, state, ref_traj[k], nominal_controller, use_pid_nominal
+        )
 
         t0 = time.perf_counter()
         u_cmd = mpc.compute(z, ref_h, u_nominal_raw=u_nom)
         solve_times.append(time.perf_counter() - t0)
+        u_cmd = u_nom + float(correction_blend) * (u_cmd - u_nom)
 
         state, u_applied = plant_step(sim, state, u_cmd, sim.dt)
         X[k + 1] = state
@@ -176,6 +244,11 @@ def run_mpc_closed_loop(mpc, sim, ref_traj, state_scaler, nominal_controller, st
     U[-1] = U[-2]
     nominal_controller.fct_reset()
     return X, U, solve_times
+
+
+def affine_linear_state(state, state_scaler):
+    x_std = state_scaler.transform(state.reshape(1, -1)).flatten()
+    return np.concatenate([x_std, [1.0]])
 
 
 def set_axes_readable(ax, xyz):
@@ -196,7 +269,30 @@ def main():
         default=0,
         help="Number of 0.01 s steps per trajectory. Defaults to 0 for full length.",
     )
+    parser.add_argument(
+        "--legacy-pid-nominal",
+        action="store_true",
+        help="Use the previous PID-centered, conservative MPC settings.",
+    )
+    parser.add_argument(
+        "--feedforward-nominal",
+        action="store_true",
+        help="Use reference acceleration feedforward instead of the PID/PX4 nominal command.",
+    )
     args = parser.parse_args()
+
+    global N_MPC, NC_MPC, R_DIAG, RD_DIAG, Q_TERMINAL_SCALE
+    global EDMD_CORRECTION_BLEND, LINEAR_CORRECTION_BLEND, USE_PID_NOMINAL
+    USE_PID_NOMINAL = not bool(args.feedforward_nominal)
+    if args.legacy_pid_nominal:
+        USE_PID_NOMINAL = True
+        N_MPC = LEGACY_N_MPC
+        NC_MPC = LEGACY_NC_MPC
+        R_DIAG = LEGACY_R_DIAG.copy()
+        RD_DIAG = LEGACY_RD_DIAG.copy()
+        Q_TERMINAL_SCALE = LEGACY_Q_TERMINAL_SCALE
+        EDMD_CORRECTION_BLEND = LEGACY_EDMD_CORRECTION_BLEND
+        LINEAR_CORRECTION_BLEND = LEGACY_LINEAR_CORRECTION_BLEND
 
     if not MODEL_FILE.exists() or not DATA_FILE.exists():
         raise FileNotFoundError(
@@ -208,8 +304,18 @@ def main():
     n_runs = states_all.shape[0]
     held_out = {idx for idx, _ in TEST_CASES if idx < n_runs}
     train_indices = [i for i in range(n_runs) if i not in held_out]
-    A_lin, B_lin, _, x_lin_scaler, u_lin_scaler = fit_linear_baseline(
+    A_lin, B_lin, c_lin, x_lin_scaler, u_lin_scaler = fit_linear_baseline(
         t_all, states_all, U_all, train_indices
+    )
+    mode = "legacy PID nominal" if args.legacy_pid_nominal else (
+        "PID nominal with physical delta limits" if USE_PID_NOMINAL
+        else "reference feedforward nominal"
+    )
+    print(f"MPC mode: {mode}")
+    print(f"MPC horizons: N={N_MPC}, NC={NC_MPC}")
+    print(
+        "MPC correction blends: "
+        f"EDMD={EDMD_CORRECTION_BLEND:g}, Linear={LINEAR_CORRECTION_BLEND:g}"
     )
 
     fig = plt.figure(figsize=(6.5 * len(TEST_CASES), 6))
@@ -228,17 +334,25 @@ def main():
         X_pid, U_pid = run_pid_baseline(sim_pid, ref_traj, steps)
 
         sim_edmd = quad_sim()
-        mpc_edmd = build_edmd_mpc(model, sim_edmd)
+        mpc_edmd = build_edmd_mpc(model, sim_edmd, legacy_pid_nominal=args.legacy_pid_nominal)
         X_edmd, U_edmd, st_edmd = run_mpc_closed_loop(
             mpc_edmd, sim_edmd, ref_traj, model["scaler"],
-            quad_sim().controller_PX4, steps, "EDMD-MPC", lifted=True
+            quad_sim().controller_PX4, steps, "EDMD-MPC", lifted=True,
+            use_pid_nominal=USE_PID_NOMINAL,
+            correction_blend=EDMD_CORRECTION_BLEND
         )
 
         sim_lin = quad_sim()
-        mpc_lin = build_linear_mpc(A_lin, B_lin, x_lin_scaler, u_lin_scaler, sim_lin)
+        mpc_lin = build_linear_mpc(
+            A_lin, B_lin, c_lin, x_lin_scaler, u_lin_scaler, sim_lin,
+            legacy_pid_nominal=args.legacy_pid_nominal
+        )
         X_lin, U_lin, st_lin = run_mpc_closed_loop(
             mpc_lin, sim_lin, ref_traj, x_lin_scaler,
-            quad_sim().controller_PX4, steps, "Linear-MPC", lifted=False
+            quad_sim().controller_PX4, steps, "Linear-MPC", lifted=False,
+            use_pid_nominal=USE_PID_NOMINAL,
+            z_builder=affine_linear_state,
+            correction_blend=LINEAR_CORRECTION_BLEND
         )
 
         pid_e = rmse(X_pid[:, 0:3], ref_xyz)

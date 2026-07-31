@@ -34,6 +34,7 @@ MODEL_FILE = SCRIPT_DIR / "edmdc_model_yaw_wrench.pkl"
 TEST_CASES = [(39, "helix"), (59, "figure-8"), (129, "lissajous")]
 ROLL_STEPS = None
 PREDICTION_WINDOW_STEPS = 100
+LINEAR_RIDGE_LAMBDAS = [0.0, 1e-6, 1e-4, 1e-2, 1.0, 100.0]
 
 
 def fit_linear_baseline(t_all, states_all, U_all, train_indices):
@@ -50,11 +51,37 @@ def fit_linear_baseline(t_all, states_all, U_all, train_indices):
     U_s = u_scaler.transform(U)
     Omega = np.hstack([Xc_s, U_s, np.ones((Xc_s.shape[0], 1))])
 
-    W, *_ = np.linalg.lstsq(Omega, Xn_s, rcond=None)
-    A = W[:STATE_DIM, :].T
-    B = W[STATE_DIM:STATE_DIM + U.shape[1], :].T
-    c = W[-1, :]
+    A, B, c, best_lam = tune_linear_ridge(
+        Omega, Xn_s, x_scaler, u_scaler, states_all, U_all
+    )
+    print(f"Linear baseline: logged-data ridge fit, lambda={best_lam:g}")
     return A, B, c, x_scaler, u_scaler
+
+
+def tune_linear_ridge(Omega, Xn_s, x_scaler, u_scaler, states_all, U_all):
+    valid_indices = [idx for idx, _ in TEST_CASES if idx < states_all.shape[0]]
+
+    best = None
+    for lam in LINEAR_RIDGE_LAMBDAS:
+        G = Omega.T @ Omega + float(lam) * np.eye(Omega.shape[1])
+        W = np.linalg.solve(G, Omega.T @ Xn_s)
+        A = W[:STATE_DIM, :].T
+        B = W[STATE_DIM:STATE_DIM + 4, :].T
+        c = W[-1, :]
+
+        scores = []
+        for idx in valid_indices:
+            X_lin = rollout_linear_windowed(
+                A, B, c, x_scaler, u_scaler,
+                states_all[idx], U_all[idx], PREDICTION_WINDOW_STEPS
+            )
+            scores.append(rmse(X_lin[:, 0:3], states_all[idx, :, 0:3]))
+        score = float(np.mean(scores)) if scores else 0.0
+        if best is None or score < best[0]:
+            best = (score, lam, A, B, c)
+
+    _, best_lam, A_best, B_best, c_best = best
+    return A_best, B_best, c_best, best_lam
 
 
 def rollout_edmd(model, x0, U, steps):
