@@ -1,74 +1,99 @@
 import numpy as np
 
+
 class pid_mixer:
+    @staticmethod
+    def fct_allocation_matrix(kT, kD, l):
+        """Return the wrench-to-rotor-thrust allocation matrix for the X frame.
 
+        The input wrench is ``[total_thrust, tau_roll, tau_pitch, tau_yaw]``
+        and the output is the four requested rotor thrusts. The same matrix is
+        used by the simulator, data logger, and MPC feasibility constraints.
+        """
+        if kT <= 0.0 or kD <= 0.0 or l <= 0.0:
+            raise ValueError("kT, kD, and l must be positive")
+        arm = l / np.sqrt(2.0)
+        yaw_force = kT / (4.0 * kD)
+        return np.array([
+            [0.25, -1.0 / (4.0 * arm),  1.0 / (4.0 * arm),  yaw_force],
+            [0.25, -1.0 / (4.0 * arm), -1.0 / (4.0 * arm), -yaw_force],
+            [0.25,  1.0 / (4.0 * arm), -1.0 / (4.0 * arm),  yaw_force],
+            [0.25,  1.0 / (4.0 * arm),  1.0 / (4.0 * arm), -yaw_force],
+        ], dtype=float)
+
+    @staticmethod
+    def fct_max_motor_forces(kT, max_omega, prop_efficiency=None):
+        """Return per-rotor thrust limits for a motor-speed limit."""
+        if kT <= 0.0 or max_omega < 0.0:
+            raise ValueError("kT must be positive and max_omega nonnegative")
+        efficiency = (
+            np.ones(4, dtype=float) if prop_efficiency is None
+            else np.asarray(prop_efficiency, dtype=float)
+        )
+        if efficiency.shape != (4,) or np.any(efficiency <= 0.0):
+            raise ValueError("prop_efficiency must contain four positive entries")
+        return efficiency * kT * float(max_omega)**2
+
+    @staticmethod
+    def fct_wrench_from_motor_forces(forces, kT, kD, l):
+        """Recover the realized body wrench from four rotor thrusts."""
+        forces = np.asarray(forces, dtype=float).reshape(-1)
+        if forces.shape != (4,):
+            raise ValueError("Expected four rotor thrusts")
+        if kT <= 0.0 or kD <= 0.0 or l <= 0.0:
+            raise ValueError("kT, kD, and l must be positive")
+        arm = l / np.sqrt(2.0)
+        yaw_ratio = kD / kT
+        return np.array([
+            np.sum(forces),
+            arm * (-forces[0] - forces[1] + forces[2] + forces[3]),
+            arm * (forces[0] - forces[1] - forces[2] + forces[3]),
+            yaw_ratio * (forces[0] - forces[1] + forces[2] - forces[3]),
+        ], dtype=float)
+
+    @staticmethod
+    def fct_allocate_wrench(u, kT, kD, l, min_omega=0.0, max_omega=2000.0,
+                            prop_efficiency=None):
+        """Allocate a requested wrench and return the wrench the plant receives.
+
+        Per-motor thrust clipping is the actuator nonlinearity in this
+        simulator. Returning the realized wrench makes that nonlinearity
+        explicit instead of silently associating a requested wrench with a
+        different state transition.
+        """
+        u_requested = np.asarray(u, dtype=float).reshape(-1)
+        if u_requested.shape != (4,):
+            raise ValueError("Expected wrench [thrust, tau_roll, tau_pitch, tau_yaw]")
+        if min_omega < 0.0 or max_omega < min_omega:
+            raise ValueError("Require 0 <= min_omega <= max_omega")
+
+        efficiency = (
+            np.ones(4, dtype=float) if prop_efficiency is None
+            else np.asarray(prop_efficiency, dtype=float)
+        )
+        if efficiency.shape != (4,) or np.any(efficiency <= 0.0):
+            raise ValueError("prop_efficiency must contain four positive entries")
+
+        allocation = pid_mixer.fct_allocation_matrix(kT, kD, l)
+        requested_forces = allocation @ u_requested
+        min_forces = efficiency * kT * float(min_omega)**2
+        max_forces = pid_mixer.fct_max_motor_forces(
+            kT, max_omega, prop_efficiency=efficiency
+        )
+        applied_forces = np.clip(requested_forces, min_forces, max_forces)
+        omega = np.sqrt(applied_forces / (efficiency * kT))
+        u_applied = pid_mixer.fct_wrench_from_motor_forces(
+            applied_forces, kT, kD, l
+        )
+        saturated = bool(np.any(~np.isclose(
+            applied_forces, requested_forces, rtol=1e-12, atol=1e-12
+        )))
+        return omega, u_applied, applied_forces, saturated
+
+    @staticmethod
     def fct_mixer(u, kT, kD, l, min_omega=0, max_omega=2000):
-        """
-        Parameters:
-        u : list or array [u1, u2, u3, u4]
-            u1: Total Thrust (N)
-            u2: Roll Torque (N*m)  (phi)
-            u3: Pitch Torque (N*m) (theta)
-            u4: Yaw Torque (N*m)   (psi)
-        kT : float
-            Thrust coefficient
-        kD : float
-            Drag torque coefficient
-        l : float
-            Arm length (meters)
-            
-        Returns:
-        omega : np.array
-            Array of 4 motor speeds [w0, w1, w2, w3] (rad/s)
-        """
-        
-        total_thrust = u[0]
-        roll_torque  = u[1]  # u2
-        pitch_torque = u[2]  # u3
-        yaw_torque   = u[3]  # u4
-
-        arm = l/np.sqrt(2)
-
-        # 1. Determine Force required per motor
-        # Thrust contribution
-        t_lift = total_thrust / 4.0
-        
-        # Term for pitch
-        t_pitch = pitch_torque / (4.0 * arm)
-        
-        # Term for roll
-        t_roll = roll_torque / (4.0 * arm)
-        
-        # Term for yaw
-        # The ratio between Torque and Force for a prop is kD/kT. 
-        # Convert the Yaw Torque back into a Force differential.
-        # The scalar is derived from: u4 = (kD/kT) * (Terms)
-        # Force contribution is: u4 * (kT/kD) / 4
-        t_yaw = (yaw_torque * kT) / (4.0 * kD)
-
-        # 2. Mix the forces
-        # Motor 0 (Front-Right):
-        T0 = t_lift - t_roll + t_pitch + t_yaw
-        
-        # Motor 1 (Rear-Right):
-        T1 = t_lift - t_roll - t_pitch - t_yaw
-        
-        # Motor 2 (Rear-Left):
-        T2 = t_lift + t_roll - t_pitch + t_yaw
-        
-        # Motor 3 (Front-Left):
-        T3 = t_lift + t_roll + t_pitch - t_yaw
-
-        # 3. Convert Force (T) to Speed (Omega)
-        # T = kT * omega^2  =>  omega = sqrt(T / kT)
-        forces = np.array([T0, T1, T2, T3])
-        
-        # Clip negative forces to 0
-        forces = np.maximum(forces, 0)
-        
-        omega = np.sqrt(forces / kT)
-        
-        # 4. Apply Motor Limits
-        omega = np.clip(omega, min_omega, max_omega)
-        
+        """Compatibility wrapper returning allocated motor speeds only."""
+        omega, _, _, _ = pid_mixer.fct_allocate_wrench(
+            u, kT, kD, l, min_omega=min_omega, max_omega=max_omega
+        )
         return omega

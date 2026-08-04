@@ -1,0 +1,6 @@
+numpy>=1.26,<2.0
+scipy>=1.11,<1.15
+scikit-learn>=1.4,<1.7
+matplotlib>=3.5,<3.10
+osqp>=1.0,<1.1
+threadpoolctl>=3.1,<4.0

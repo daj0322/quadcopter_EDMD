@@ -18,6 +18,13 @@ class PID_trajectory_controller:
         PID = self.kp*error + self.ki*self.integral + self.kd*derivative
         return PID
 
+    def fct_control_with_error_rate(self, error, error_rate, dt):
+        self.integral += error * dt
+        self.integral = float(np.clip(self.integral, -self.integral_limit, self.integral_limit))
+        self.prev_error = error
+        PID = self.kp*error + self.ki*self.integral + self.kd*error_rate
+        return PID
+
     def fct_reset(self):
         self.integral = 0.0
         self.prev_error = 0.0
